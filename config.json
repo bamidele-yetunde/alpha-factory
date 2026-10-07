@@ -36,7 +36,10 @@
       "INDUSTRY",
       "MARKET"
     ],
-    "universe": []
+    "universe": [
+      "TOP3000",
+      "TOP2000"
+    ]
   },
   "fields": [],
   "min_field_coverage": 0.5,
@@ -142,7 +145,8 @@
     }
   },
   "combo_universes": [
-    "TOP3000"
+    "TOP3000",
+    "TOP2000"
   ],
   "mode": "normal",
   "sweep_target_passes": 5,
@@ -159,6 +163,7 @@
     "universe_swap"
   ],
   "repair_universes": [
-    "TOP3000"
+    "TOP3000",
+    "TOP2000"
   ]
 }
