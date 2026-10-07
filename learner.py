@@ -272,9 +272,15 @@ class Knowledge:
             return row
         row = dict(row)
         check = self.checks.get(row["alpha_id"])
+        # robustness_mode "warn": BRAIN accepts alphas that only fail our robustness rule (e.g. a
+        # losing 2023), so list them as passes marked RISKY instead of hiding them.
+        risky_only = (check is not None and check["verdict"] == "FAIL" and check["failed"] == "NOT_ROBUST"
+                      and self.cfg.get("robustness_mode", "block") == "warn")
         if (check is None or check["verdict"] == "RETRY"
-                or (check["verdict"] == "PASS" and self.check_is_stale(row, check))):
+                or ((check["verdict"] == "PASS" or risky_only) and self.check_is_stale(row, check))):
             row["passed"] = "Pending"
+        elif risky_only:
+            row["risky"] = check["detail"].replace("NOT_ROBUST ", "")
         elif check["verdict"] != "PASS":
             row["passed"] = "False"
             row["failed_checks"] = check["failed"]
@@ -602,7 +608,7 @@ class Knowledge:
                 best = False
             if best or all_passes:
                 out.append({**r, "self_corr": self.checks[r["alpha_id"]]["self_corr"],
-                            "family": family + 1, "best_in_family": best})
+                            "family": family + 1, "best_in_family": best, "risky": r.get("risky", "")})
         return out[:n]
 
     def suggestions(self, cycles, failures):

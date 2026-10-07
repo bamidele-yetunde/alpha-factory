@@ -165,8 +165,9 @@ def write_reports(cfg):
         if r["alpha_id"] not in before:
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}) {r['expression']} {r['settings']}")
+            risk = f"  ⚠️ RISKY: {r['risky']}" if r.get("risky") else ""
             telegram("\n".join([
-                f"✅ NEW PASS: {r['alpha_id']}",
+                f"✅ NEW PASS: {r['alpha_id']}{risk}",
                 f"Sharpe {r['sharpe']} | Fitness {r['fitness']} | Self-corr {r['self_corr']} | Family {r['family']}",
                 f"Submit on BRAIN: Alphas > Unsubmitted > search {r['alpha_id']}",
                 "(Submit one per family at a time.)"]))
@@ -185,11 +186,11 @@ def write_reports(cfg):
             telegram(f"⚠️ {alpha_id} removed from the ready list: {reason}. Don't submit it now.")
     with READY.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["alpha_id", "family", "best_in_family", "sharpe", "fitness", "turnover", "self_corr",
-                         "yearly_sharpe", "verified_at", "expression", "settings"])
+        writer.writerow(["alpha_id", "family", "best_in_family", "risky", "sharpe", "fitness", "turnover",
+                         "self_corr", "yearly_sharpe", "verified_at", "expression", "settings"])
         for r in sorted(ready, key=lambda r: (r["family"], not r["best_in_family"])):
             check = know.checks[r["alpha_id"]]
-            writer.writerow([r["alpha_id"], r["family"], "yes" if r["best_in_family"] else "no",
+            writer.writerow([r["alpha_id"], r["family"], "yes" if r["best_in_family"] else "no", r["risky"],
                              r["sharpe"], r["fitness"], r["turnover"], check["self_corr"],
                              check["yearly_sharpe"], check["checked_at"], r["expression"], r["settings"]])
     return know

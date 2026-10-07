@@ -157,5 +157,6 @@
   "sweep_repair_min_sharpe": 0.8,
   "sweep_max_depth": 4,
   "sweep_seed_min_sharpe": 1.0,
-  "heartbeat_hours": 3
+  "heartbeat_hours": 3,
+  "robustness_mode": "warn"
 }
