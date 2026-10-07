@@ -55,7 +55,8 @@ jobs:
       - name: Queue the next run
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run alpha-factory.yml --ref main -R "${{ github.repository }}" || echo "could not queue the next run (the hourly schedule is the backup)"
+        run: |
+          gh workflow run alpha-factory.yml --ref main -R "${{ github.repository }}" || echo "could not queue the next run (the hourly schedule is the backup)"
 
       - name: Work and save (encrypted) every ~40 minutes
         run: |
@@ -104,4 +105,5 @@ jobs:
 
       - name: Alert if the run failed
         if: failure()
-        run: python -c "from notify import telegram; telegram('❌ Alpha bot: a GitHub run failed (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). If no heartbeat arrives within 2 hours, the bot has stopped.')" || true
+        run: |
+          python -c "from notify import telegram; telegram('❌ Alpha bot: a GitHub run failed (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). If no heartbeat arrives within 2 hours, the bot has stopped.')" || true
