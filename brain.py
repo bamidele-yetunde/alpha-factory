@@ -21,6 +21,11 @@ class BrainBusy(BrainError):
     """BRAIN was overloaded or unreachable; the request itself may be fine to retry later."""
 
 
+class BrainStuck(BrainError):
+    """A simulation BRAIN never finished (it kept saying "retry later"). Recorded as an error so the
+    same simulation isn't retried every cycle: on 2026-10-07 one froze a whole run for 2+ hours."""
+
+
 def table(recordset):
     """Turn BRAIN's {schema, records} format into a list of dicts."""
     if not recordset or "records" not in recordset:
@@ -95,8 +100,9 @@ class Brain:
             return r
         raise BrainBusy(f"{method} {url} kept failing: {last}")
 
-    def _wait(self, url, max_seconds=None):
-        """Poll a progress URL until BRAIN stops sending Retry-After (or max_seconds passes)."""
+    def _wait(self, url, max_seconds=None, on_timeout=BrainBusy):
+        """Poll a progress URL until BRAIN stops sending Retry-After (or max_seconds passes,
+        then raise `on_timeout`)."""
         deadline = time.time() + max_seconds if max_seconds else None
         while True:
             r = self.request("GET", url)
@@ -104,7 +110,7 @@ class Brain:
             if wait == 0:
                 return r
             if deadline and time.time() + wait > deadline:
-                raise BrainBusy(f"{url} still not finished after {max_seconds}s")
+                raise on_timeout(f"{url} still not finished after {max_seconds}s")
             time.sleep(wait)
 
     def simulate(self, expression, settings):
@@ -114,7 +120,7 @@ class Brain:
         if r.status_code != 201:
             raise BrainError(f"Simulation rejected ({r.status_code}): {r.text[:300]}")
         # A simulation stuck on BRAIN's side must not hang the whole run (it did on 2026-10-07).
-        result = self._wait(r.headers["Location"], max_seconds=20 * 60).json()
+        result = self._wait(r.headers["Location"], max_seconds=20 * 60, on_timeout=BrainStuck).json()
         if "alpha" not in result:
             raise BrainError(result.get("message") or f"status {result.get('status')}")
         return self.alpha(result["alpha"])

@@ -1,7 +1,7 @@
 name: alpha-factory
 
 # Runs the alpha tool on GitHub's servers around the clock: a run starts every hour; if one is
-# still going, the next waits for it. Each run works for up to ~5 hours, saving every ~40 minutes.
+# still going, the next waits for it. Each run works for up to ~4.5 hours, saving every ~40 minutes.
 on:
   schedule:
     - cron: "7 * * * *"
@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19, which could break the Python setup.
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     env:
       BRAIN_EMAIL: ${{ secrets.BRAIN_EMAIL }}
@@ -27,9 +28,9 @@ jobs:
       QUIET: "1"            # public repo: never print alpha details to the run log
       TZ: "Africa/Lagos"    # log and message times in your local time (UTC+1)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -38,32 +39,41 @@ jobs:
 
       - name: Restore encrypted state
         run: |
-          git fetch -q origin state || true
-          git show origin/state:state.enc > state.enc 2>/dev/null || rm -f state.enc
+          # The saved state must load. If it can't be fetched, stop: starting "fresh" would make the
+          # first save overwrite all results with an empty state.
+          for i in 1 2 3; do git fetch -q origin state && break; sleep 20; done
+          git show origin/state:state.enc > state.enc
           python state_crypt.py unpack
+          test -f results.csv
 
       - name: Work and save (encrypted) every ~40 minutes
         run: |
-          git config user.name "alpha-factory"
-          git config user.email "alpha-factory@users.noreply.github.com"
           save() {
-            python state_crypt.py pack > /dev/null
+            python state_crypt.py pack > /dev/null || return 1
             tmp=$(mktemp -d); cp state.enc "$tmp/"
             git -C "$tmp" init -q -b state
             git -C "$tmp" add state.enc
             git -C "$tmp" -c user.name=alpha-factory -c user.email=alpha-factory@users.noreply.github.com commit -q -m "state"
-            git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state
+            for i in 1 2 3; do
+              git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state && break
+              sleep 20
+            done
             rm -rf "$tmp"
           }
-          end=$((SECONDS + 280*60))
+          alert() { python -c "import sys; from notify import telegram; telegram(sys.argv[1])" "$1" || true; }
+          # 270 min of work + one chunk of at most 70 min + saves stays under the 350-min job limit.
+          end=$((SECONDS + 270*60))
           while [ $SECONDS -lt $end ]; do
             # Hard cap per chunk: even if something hangs, progress is still saved and the loop goes on.
-            if ! timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1; then
-              echo "run step failed or timed out (details are in the encrypted log)"
-              python -c "from notify import telegram; telegram('⚠️ Alpha bot: a work chunk crashed or hit its 70-min limit. Progress was saved; carrying on.')" || true
+            rc=0  # (steps run under bash -e: capture the exit code instead of letting it end the loop)
+            timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || rc=$?
+            if [ $rc -eq 124 ]; then
+              alert "⚠️ Alpha bot: a work chunk hit its 70-min limit (something on BRAIN hung). Progress saved; carrying on."
+            elif [ $rc -ne 0 ]; then
+              alert "⚠️ Alpha bot: a work chunk crashed (exit $rc). Progress saved; carrying on."
             fi
-            save
-            echo "saved at $(date -u +%H:%M) UTC"
+            save || alert "⚠️ Alpha bot: saving progress to GitHub failed; will try again after the next chunk."
+            echo "chunk exit $rc, saved at $(date -u +%H:%M) UTC"
           done
 
       - name: Final save
@@ -75,5 +85,8 @@ jobs:
             git -C "$tmp" init -q -b state
             git -C "$tmp" add state.enc
             git -C "$tmp" -c user.name=alpha-factory -c user.email=alpha-factory@users.noreply.github.com commit -q -m "state"
-            git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state
+            for i in 1 2 3; do
+              git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state && break
+              sleep 20
+            done
           fi

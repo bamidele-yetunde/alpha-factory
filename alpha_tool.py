@@ -267,6 +267,7 @@ def verify_and_record(alpha_ids, cfg, sync_each=False):
     from brain import BrainBusy, BrainError
     results = {}
     for i, alpha_id in enumerate(alpha_ids, 1):
+        safe_heartbeat(cfg)
         if sync_each and i > 1:
             sync_submitted()
             write_reports(cfg)
@@ -300,8 +301,30 @@ def verify_and_record(alpha_ids, cfg, sync_each=False):
 def verify_pending(cfg, sync_each=False):
     """Verify every in-sample pass that has not been verified yet."""
     know = knowledge(cfg)
-    pending = [r["alpha_id"] for r in know.sims
-               if r["passed"] == "Pending" and r["alpha_id"] not in know.submitted]
+    pending = list(dict.fromkeys(r["alpha_id"] for r in know.sims  # an ID can appear in several rows
+                                 if r["passed"] == "Pending" and r["alpha_id"] not in know.submitted))
+    # Back off on alphas whose BRAIN check keeps erroring: 30 min after the first failed check,
+    # doubling up to 8 h. On 2026-10-07, 339 failed re-checks of 40 alphas took ~3 of 12 hours.
+    streak, last_try = {}, {}
+    for c in load_csv(CHECKS):
+        streak[c["alpha_id"]] = streak.get(c["alpha_id"], 0) + 1 if c["verdict"] == "RETRY" else 0
+        last_try[c["alpha_id"]] = c["checked_at"]
+    now = datetime.now()
+
+    def due(alpha_id):
+        n = streak.get(alpha_id, 0)
+        if not n or not last_try.get(alpha_id):
+            return True
+        wait = min(cfg.get("retry_check_minutes", 30) * 2 ** (n - 1), 8 * 60)
+        try:
+            return (now - datetime.fromisoformat(last_try[alpha_id])).total_seconds() >= wait * 60
+        except ValueError:
+            return True
+
+    waiting = [a for a in pending if not due(a)]
+    pending = [a for a in pending if due(a)]
+    if waiting and pending:
+        log(f"  ({len(waiting)} alphas whose BRAIN check keeps erroring are waiting before the next try)")
     if pending:
         log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness)")
         verify_and_record(pending, cfg, sync_each=sync_each)
@@ -354,6 +377,7 @@ def simulate_jobs(jobs, cfg, cycle):
         futures = [pool.submit(run_one, job) for job in jobs]
         for i, fut in enumerate(as_completed(futures), 1):
             row = fut.result()
+            safe_heartbeat(cfg)  # long batches must not delay the hourly "alive" message
             if row.get("error"):
                 status = "ERROR " + row["error"][:80]
             else:
@@ -600,10 +624,18 @@ def heartbeat(cfg):
         log("HEARTBEAT sent")
 
 
+def safe_heartbeat(cfg):
+    """Heartbeat from inside long loops; a Telegram or file problem must never stop the work."""
+    try:
+        heartbeat(cfg)
+    except Exception as e:
+        log(f"Heartbeat failed: {str(e)[:120]}")
+
+
 def watch_once(cfg):
     """Sync your submissions, re-check the ready list, then alphas waiting for a check."""
     from brain import BrainError
-    heartbeat(cfg)
+    safe_heartbeat(cfg)
     try:
         sync_submitted()
         write_reports(cfg)  # drop what you just submitted straight away

@@ -165,5 +165,6 @@
   "repair_universes": [
     "TOP3000",
     "TOP2000"
-  ]
+  ],
+  "retry_check_minutes": 30
 }
