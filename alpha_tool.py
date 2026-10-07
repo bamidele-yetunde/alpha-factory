@@ -160,16 +160,26 @@ def write_reports(cfg):
     know.write_insights(INSIGHTS)
     before = {r["alpha_id"] for r in load_csv(READY)}
     ready = know.shortlist(200, all_passes=True)
-    from notify import telegram
+    from notify import block, code, esc, telegram
     for r in ready:
         if r["alpha_id"] not in before:
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}) {r['expression']} {r['settings']}")
-            risk = f"  ⚠️ RISKY: {r['risky']}" if r.get("risky") else ""
+            risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
+            s = json.loads(r["settings"] or "{}")
+            full = {**cfg["settings"], **s}
+            settings_line = (f"{full.get('universe')} | decay {full.get('decay')} | "
+                             f"neutralization {full.get('neutralization')} | truncation {full.get('truncation')}")
             telegram("\n".join([
-                f"✅ NEW PASS: {r['alpha_id']}{risk}",
-                f"Sharpe {r['sharpe']} | Fitness {r['fitness']} | Self-corr {r['self_corr']} | Family {r['family']}",
-                f"Submit on BRAIN: Alphas > Unsubmitted > search {r['alpha_id']}",
+                f"✅ NEW PASS: {code(r['alpha_id'])}{risk}",
+                f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])} | "
+                f"Family {esc(r['family'])}",
+                "",
+                "Tap the ID above to copy it, then on BRAIN: Alphas > Unsubmitted > search > Submit.",
+                "",
+                "Expression (tap to copy):",
+                block(r["expression"]),
+                f"Settings: {code(settings_line)}",
                 "(Submit one per family at a time.)"]))
     for alpha_id in before - {r["alpha_id"] for r in ready}:
         if alpha_id in know.submitted:
@@ -183,7 +193,7 @@ def write_reports(cfg):
             reason = "no longer passes verification"
         log(f"READY TO SUBMIT: {alpha_id} removed ({reason})")
         if reason != "submitted":
-            telegram(f"⚠️ {alpha_id} removed from the ready list: {reason}. Don't submit it now.")
+            telegram(f"⚠️ {code(alpha_id)} removed from the ready list: {esc(reason)}. Don't submit it now.")
     with READY.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["alpha_id", "family", "best_in_family", "risky", "sharpe", "fitness", "turnover",
@@ -571,7 +581,7 @@ def cmd_auto(args):
 def heartbeat(cfg):
     """Every `heartbeat_hours` (default 3), send a Telegram 'still alive' message with a short status.
     If these stop arriving, the tool has stopped running."""
-    from notify import telegram
+    from notify import code, esc, telegram
     try:
         state = json.loads(NOTIFIED.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -591,8 +601,8 @@ def heartbeat(cfg):
     if last:
         lines.append(f"Last {hours}h: {len(know.sims) - state.get('sims', 0)} simulations, "
                      f"{len(verified) - state.get('verified', 0)} new verified passes")
-    lines += [f"Ready to submit: {len(ready)}" + (f" ({', '.join(ready[:5])})" if ready else ""),
-              f"Working on: {working_on}",
+    lines += [f"Ready to submit: {len(ready)}" + (f" ({', '.join(code(a) for a in ready[:5])})" if ready else ""),
+              f"Working on: {esc(working_on)}",
               f"Total submitted from the tool: {len(submitted)}"]
     if telegram("\n".join(lines)):
         state.update(heartbeat_at=now.isoformat(timespec="seconds"), sims=len(know.sims), verified=len(verified))

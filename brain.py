@@ -61,9 +61,9 @@ class Brain:
                     r = self.s.post(url, timeout=60)
                 else:
                     # Unattended (GitHub Actions): send the link by Telegram and wait for it to be completed.
-                    from notify import telegram
+                    from notify import esc, telegram
                     telegram(f"\U0001F510 BRAIN wants an identity check before the alpha tool can log in.\n"
-                             f"Open this link and complete it within 20 minutes:\n{url}")
+                             f"Open this link and complete it within 20 minutes:\n{esc(url)}")
                     for _ in range(40):
                         time.sleep(30)
                         r = self.s.post(url, timeout=60)

@@ -1,5 +1,8 @@
 """Telegram alerts. Uses TELEGRAM_TOKEN / TELEGRAM_CHAT_ID (GitHub secrets), or a local
-telegram.json (never committed). Silently does nothing if neither is set."""
+telegram.json (never committed). Silently does nothing if neither is set.
+
+Messages are sent as HTML, so anything wrapped with code() appears as tap-to-copy text."""
+import html
 import json
 import os
 from pathlib import Path
@@ -17,13 +20,30 @@ def _settings():
     return token, chat
 
 
+def esc(text):
+    """Make plain text safe inside an HTML message."""
+    return html.escape(str(text), quote=False)
+
+
+def code(text):
+    """Tap-to-copy monospace text."""
+    return f"<code>{esc(text)}</code>"
+
+
+def block(text):
+    """Tap-to-copy monospace block, for longer text like an expression."""
+    return f"<pre>{esc(text)}</pre>"
+
+
 def telegram(text):
+    """Send an HTML message. Plain parts must be passed through esc()."""
     token, chat = _settings()
     if not (token and chat):
         return False
     try:
         r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat, "text": text, "disable_web_page_preview": True}, timeout=20)
+                          json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                "disable_web_page_preview": True}, timeout=20)
         return r.ok
     except requests.RequestException:
         return False
