@@ -58,7 +58,10 @@ jobs:
           end=$((SECONDS + 280*60))
           while [ $SECONDS -lt $end ]; do
             # Hard cap per chunk: even if something hangs, progress is still saved and the loop goes on.
-            timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || echo "run step failed or timed out (details are in the encrypted log)"
+            if ! timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1; then
+              echo "run step failed or timed out (details are in the encrypted log)"
+              python -c "from notify import telegram; telegram('⚠️ Alpha bot: a work chunk crashed or hit its 70-min limit. Progress was saved; carrying on.')" || true
+            fi
             save
             echo "saved at $(date -u +%H:%M) UTC"
           done

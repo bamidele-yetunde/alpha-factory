@@ -375,9 +375,9 @@ class Knowledge:
     # ---------- repairing near-misses ----------
 
     def rank_repairs(self, checks):
-        order = []
+        order, skip = [], set(self.cfg.get("skip_repairs", []))
         for check in checks:
-            order += [k for k in REPAIRS.get(check, []) if k not in order]
+            order += [k for k in REPAIRS.get(check, []) if k not in order and k not in skip]
 
         def score(kind):
             tries = improved = passed = 0
@@ -431,7 +431,8 @@ class Knowledge:
         def score(kind):
             t, i, p = [sum(self.repair_stats.get((kind, c), (0, 0, 0))[k] for c in checks) for k in range(3)]
             return (i + 2 * p + 1) / (3 * t + 3)
-        return sorted(CORR_REPAIRS, key=lambda k: (-score(k), CORR_REPAIRS.index(k)))
+        kinds = [k for k in CORR_REPAIRS if k not in self.cfg.get("skip_repairs", [])]
+        return sorted(kinds, key=lambda k: (-score(k), CORR_REPAIRS.index(k)))
 
     def plan_corr_repairs(self, seen, budget, fields_by_dataset, focus=None):
         """Alphas that passed in-sample but failed self-correlation/robustness: change field,
@@ -443,6 +444,7 @@ class Knowledge:
         candidates = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
                       and (focus is None or r["alpha_id"] in focus)
                       and set(r["failed_checks"].split(";")) & GATE_CHECKS
+                      and self.repairable_universe(r)
                       and (focus or not r["window"] or r["window"] in windows)
                       and int(r["depth"] or 0) < max_depth
                       and "subtract_corr" not in self.child_repairs[r["alpha_id"]]]
@@ -528,6 +530,13 @@ class Knowledge:
                          "depth": max(int(a["depth"] or 0), int(b["depth"] or 0)) + 1})
         return jobs
 
+    def repairable_universe(self, r):
+        """`repair_universes` in config.json: only repair alphas simulated on these universes
+        (all 14 verified passes up to 2026-10-07 were TOP3000; TOP1000/500/200 gave 0 in 364 sims)."""
+        allowed = self.cfg.get("repair_universes")
+        universe = json.loads(r["settings"] or "{}").get("universe", self.cfg["settings"]["universe"])
+        return not allowed or universe in allowed
+
     def plan_repairs(self, done, budget, fields=(), focus=None):
         """focus: in sweep mode, only repair this set of alpha ids (one idea's versions), with a
         lower Sharpe threshold and deeper limit, and no combinations."""
@@ -547,6 +556,7 @@ class Knowledge:
         candidates = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
                       and (focus is None or r["alpha_id"] in focus)
                       and not set(r["failed_checks"].split(";")) & GATE_CHECKS
+                      and self.repairable_universe(r)
                       and (focus or not r["window"] or r["window"] in windows)  # skip retired windows
                       and int(r["depth"] or 0) < max_depth
                       and abs(num(r["sharpe"])) >= min_sharpe
