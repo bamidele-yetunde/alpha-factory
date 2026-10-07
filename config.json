@@ -1,0 +1,161 @@
+{
+  "settings": {
+    "instrumentType": "EQUITY",
+    "region": "USA",
+    "universe": "TOP3000",
+    "delay": 1,
+    "decay": 7,
+    "neutralization": "MARKET",
+    "truncation": 0.08,
+    "pasteurization": "ON",
+    "unitHandling": "VERIFY",
+    "nanHandling": "ON",
+    "maxTrade": "OFF",
+    "language": "FASTEXPR",
+    "visualization": false
+  },
+  "search": {
+    "windows": [
+      66,
+      126,
+      252,
+      504
+    ],
+    "groups": [
+      "subindustry",
+      "industry",
+      "sector"
+    ],
+    "decay": [
+      4,
+      7,
+      12
+    ],
+    "neutralization": [
+      "NONE",
+      "MARKET",
+      "SECTOR",
+      "INDUSTRY",
+      "SUBINDUSTRY"
+    ],
+    "universe": [
+      "TOP1000",
+      "TOP500"
+    ]
+  },
+  "fields": [],
+  "min_field_coverage": 0.5,
+  "new_alphas_per_cycle": 30,
+  "repairs_per_cycle": 50,
+  "repairs_per_alpha": 3,
+  "max_repair_depth": 2,
+  "repair_min_sharpe": 1.1,
+  "max_per_field_per_cycle": 3,
+  "max_passes_per_field": 2,
+  "dead_after_trials": 15,
+  "exclude": [
+    "field:fnd6_adesinda_curcd",
+    "field:fnd6_cik",
+    "field:fnd6_cptrank_gvkeymap",
+    "field:fnd6_currencya_curcd",
+    "field:fnd6_currencyqv1300_curcd",
+    "field:fnd6_ein",
+    "field:fnd6_fic",
+    "field:fnd6_fyrc",
+    "field:fnd6_idesindq_curcd",
+    "field:fnd6_state",
+    "field:fnd6_weburl",
+    "field:fnd6_zipcode",
+    "field:adjfactor",
+    "field:country",
+    "field:currency",
+    "field:cusip",
+    "field:exchange",
+    "field:isin",
+    "field:sedol",
+    "field:ticker",
+    "field:split",
+    "field:top1000",
+    "field:top200",
+    "field:top2000",
+    "field:top3000",
+    "field:top500",
+    "field:topsp500",
+    "field:pv13_revere_city",
+    "field:pv13_revere_country",
+    "field:pv13_revere_zipcode",
+    "field:pv13_revere_parent",
+    "field:pv13_reveremap"
+  ],
+  "robustness": {
+    "max_losing_years": 1,
+    "min_year_sharpe": -0.5,
+    "min_last_year_sharpe": 0.5
+  },
+  "concurrent_simulations": 3,
+  "corr_repairs_per_alpha": 3,
+  "max_corr_repair_depth": 2,
+  "combos_per_cycle": 40,
+  "combo_min_sharpe": 0.85,
+  "combo_pool": 80,
+  "submission_lag_minutes": 45,
+  "combo_uses_per_alpha": 1,
+  "universe_profiles": {
+    "TOP1000": {
+      "groups": [
+        "industry",
+        "sector"
+      ],
+      "neutralization": [
+        "MARKET",
+        "SECTOR",
+        "INDUSTRY"
+      ],
+      "decay": [
+        4,
+        7,
+        12,
+        20
+      ],
+      "truncation": [
+        0.05,
+        0.08,
+        0.1
+      ]
+    },
+    "TOP500": {
+      "groups": [
+        "sector",
+        "industry",
+        "market"
+      ],
+      "neutralization": [
+        "MARKET",
+        "SECTOR"
+      ],
+      "decay": [
+        4,
+        7,
+        12,
+        20
+      ],
+      "truncation": [
+        0.05,
+        0.08,
+        0.1
+      ]
+    }
+  },
+  "combo_universes": [
+    "TOP1000",
+    "TOP500"
+  ],
+  "mode": "sweep",
+  "sweep_target_passes": 5,
+  "sweep_max_sims": 90,
+  "sweep_repairs_per_round": 15,
+  "sweep_repair_min_sharpe": 0.8,
+  "sweep_max_depth": 4,
+  "sweep_seed_min_sharpe": 1.0,
+  "heartbeat_hours": 3
+}

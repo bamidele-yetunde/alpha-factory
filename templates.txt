@@ -1,0 +1,32 @@
+# One Fast Expression per line. Lines starting with # are ignored.
+# Placeholders get filled in automatically:
+#   {field}  -> each data field (from config.json "fields", or fields.csv)
+#   {window} -> each lookback in config.json "windows"
+#   {group}  -> each grouping in config.json "groups"
+
+# Your current idea, generalised to any field
+group_rank(ts_backfill(ts_rank(ts_backfill({field}, 21), {window}), 21), {group})
+
+# Where today's value sits vs. its own history, ranked against peers
+group_rank(ts_rank(ts_backfill({field}, 63), {window}), {group})
+
+# Mean reversion: bet against unusually high values
+-ts_zscore(ts_backfill({field}, 63), {window})
+
+# Size-adjusted level vs. peers (good for fundamentals like equity, sales, cash)
+group_rank(ts_backfill({field}, 63) / cap, {group})
+
+# Recent change in the field, ranked against peers
+group_rank(ts_delta(ts_backfill({field}, 63), {window}), {group})
+
+# Distance from its own average, neutralised within the group
+group_neutralize(ts_av_diff(ts_backfill({field}, 63), {window}), {group})
+
+# Trend: is the field rising vs. its own long-run level? (short vs long average)
+group_zscore(ts_mean(ts_backfill({field}, 63), 22) - ts_mean(ts_backfill({field}, 63), {window}), {group})
+
+# Stability: companies whose numbers are steadier than peers
+-group_rank(ts_std_dev(ts_backfill({field}, 63), {window}), {group})
+
+# Does the field move with the stock? (data that leads returns)
+group_rank(ts_corr(ts_backfill({field}, 63), returns, {window}), {group})

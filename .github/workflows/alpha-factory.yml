@@ -1,0 +1,74 @@
+name: alpha-factory
+
+# Runs the alpha tool on GitHub's servers around the clock: a run starts every hour; if one is
+# still going, the next waits for it. Each run works for up to ~5 hours, saving every ~40 minutes.
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: alpha-factory
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      BRAIN_EMAIL: ${{ secrets.BRAIN_EMAIL }}
+      BRAIN_PASSWORD: ${{ secrets.BRAIN_PASSWORD }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      QUIET: "1"            # public repo: never print alpha details to the run log
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -q -r requirements.txt
+
+      - name: Restore encrypted state
+        run: |
+          git fetch -q origin state || true
+          git show origin/state:state.enc > state.enc 2>/dev/null || rm -f state.enc
+          python state_crypt.py unpack
+
+      - name: Work and save (encrypted) every ~40 minutes
+        run: |
+          git config user.name "alpha-factory"
+          git config user.email "alpha-factory@users.noreply.github.com"
+          save() {
+            python state_crypt.py pack > /dev/null
+            tmp=$(mktemp -d); cp state.enc "$tmp/"
+            git -C "$tmp" init -q -b state
+            git -C "$tmp" add state.enc
+            git -C "$tmp" -c user.name=alpha-factory -c user.email=alpha-factory@users.noreply.github.com commit -q -m "state"
+            git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state
+            rm -rf "$tmp"
+          }
+          end=$((SECONDS + 280*60))
+          while [ $SECONDS -lt $end ]; do
+            python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || echo "run step failed (details are in the encrypted log)"
+            save
+            echo "saved at $(date -u +%H:%M) UTC"
+          done
+
+      - name: Final save
+        if: always()
+        run: |
+          if [ -f results.csv ]; then
+            python state_crypt.py pack > /dev/null
+            tmp=$(mktemp -d); cp state.enc "$tmp/"
+            git -C "$tmp" init -q -b state
+            git -C "$tmp" add state.enc
+            git -C "$tmp" -c user.name=alpha-factory -c user.email=alpha-factory@users.noreply.github.com commit -q -m "state"
+            git -C "$tmp" push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" state
+          fi

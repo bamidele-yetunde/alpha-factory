@@ -1,0 +1,78 @@
+# Research-based alpha ideas, written as BRAIN Fast Expressions.
+# Same format as templates.txt: one expression per line, # for comments.
+# {window} and {group} are filled from config.json; {field} / {field2} / {vfield} are data-field blanks.
+# Every field name below was checked against fields.csv. Each line is learned from separately,
+# so ideas that keep failing get skipped automatically and ideas that work get explored more.
+
+# ---------- Value (Fama-French; Lakonishok-Shleifer-Vishny) ----------
+group_rank(ts_backfill(equity, 63) / cap, {group})
+group_rank(ts_backfill(income, 63) / cap, {group})
+group_rank(ts_backfill(cashflow_op, 63) / cap, {group})
+-group_rank(ts_backfill(enterprise_value, 63) / ts_backfill(ebitda, 63), {group})
+group_rank(ts_sum(dividend, 252) / close, {group})
+
+# ---------- Profitability & quality (Novy-Marx 2013; Piotroski; Altman) ----------
+group_rank((ts_backfill(sales, 63) - ts_backfill(cogs, 63)) / ts_backfill(assets, 63), {group})
+group_rank(ts_backfill(income, 63) / ts_backfill(equity, 63), {group})
+group_rank(ts_backfill(retained_earnings, 63) / ts_backfill(assets, 63), {group})
+group_rank(ts_backfill(fscore_quality, 63), {group}) + group_rank(ts_backfill(fscore_value, 63), {group})
+group_rank(ts_backfill(fscore_total, 63), {group})
+
+# ---------- Accruals & earnings quality (Sloan 1996; Thomas-Zhang 2002) ----------
+-group_rank((ts_backfill(income, 63) - ts_backfill(cashflow_op, 63)) / ts_backfill(assets, 63), {group})
+-group_rank(ts_delta(ts_backfill(inventory, 63), 252) / ts_backfill(assets, 63), {group})
+-group_rank(ts_delta(ts_backfill(receivable, 63) / ts_backfill(sales, 63), 252), {group})
+
+# ---------- Investment & financing (Cooper-Gulen-Schill 2008; Pontiff-Woodgate 2008; Titman-Wei-Xie) ----------
+-group_rank(ts_delta(ts_backfill(assets, 63), 252) / ts_delay(ts_backfill(assets, 63), 252), {group})
+-group_rank(ts_delta(sharesout, 252) / ts_delay(sharesout, 252), {group})
+-group_rank(ts_backfill(capex, 63) / ts_backfill(assets, 63), {group})
+group_rank(ts_backfill(rd_expense, 63) / cap, {group})
+
+# ---------- Earnings surprise & analysts (Bernard-Thomas PEAD; Chan-Jegadeesh-Lakonishok; Diether-Malloy-Scherbina) ----------
+group_rank((ts_backfill(eps, 63) - ts_delay(ts_backfill(eps, 63), 252)) / ts_std_dev(ts_backfill(eps, 63), 504), {group})
+group_rank(ts_delta(ts_backfill(est_sales, 63), {window}) / ts_backfill(sales, 63), {group})
+-group_rank(ts_backfill(net_income_stddev, 63) / abs(ts_backfill(net_income_avg, 63)), {group})
+group_rank(ts_delta(ts_backfill(est_cashflow_op, 63), {window}) / cap, {group})
+
+# ---------- Momentum, risk & liquidity (Jegadeesh-Titman; Ang et al. 2006; Amihud 2002; George-Hwang; Frazzini-Pedersen) ----------
+group_rank(ts_delay(ts_sum(returns, 231), 21), {group})
+-group_rank(ts_std_dev(returns, 252), {group})
+group_rank(ts_mean(abs(returns) / (volume * close + 1), 252), {group})
+-group_rank(ts_mean(volume / sharesout, 126), {group})
+-group_rank(ts_arg_max(close, 252), {group})
+-group_rank(ts_backfill(beta_last_360_days_spy, 63), {group})
+
+# ---------- Options (Xing-Zhang-Zhao 2010; Goyal-Saretto 2009; An et al. 2014; Pan-Poteshman 2006) ----------
+-group_rank(implied_volatility_put_30 - implied_volatility_call_30, {group})
+group_rank(historical_volatility_30 - implied_volatility_mean_30, {group})
+group_rank(ts_delta(implied_volatility_call_30, 22) - ts_delta(implied_volatility_put_30, 22), {group})
+-group_rank(ts_mean(pcr_vol_30, 22), {group})
+group_rank(implied_volatility_mean_360 - implied_volatility_mean_30, {group})
+
+# ---------- News, sentiment & short interest (Tetlock; Asquith-Pathak-Ritter) ----------
+group_rank(ts_mean(mean_composite_sentiment_score, 22) - ts_mean(mean_composite_sentiment_score, {window}), {group})
+group_rank(ts_backfill(rp_css_earnings, 63), {group})
+group_rank(ts_mean(scl12_sentiment, 22), {group})
+-group_rank(ts_backfill(news_short_interest, 63), {group})
+-group_rank(ts_delta(ts_backfill(news_short_interest, 63), 22), {group})
+
+# ---------- Economic links (Cohen-Frazzini 2008 customer momentum) ----------
+group_rank(ts_sum(ts_backfill(rel_ret_cust, 5), 22), {group})
+group_rank(ts_sum(ts_backfill(rel_ret_comp, 5), 22), {group})
+
+# ---------- WorldQuant "101 Formulaic Alphas" (Kakushadze 2016), translated to BRAIN operators ----------
+sign(ts_delta(volume, 1)) * (-1 * ts_delta(close, 1))
+-ts_corr(open, volume, 10)
+rank(-(1 - open / close))
+power(high * low, 0.5) - vwap
+rank(vwap - close) / rank(vwap + close)
+-ts_delta(((close - low) - (high - close)) / (close - low + 0.001), 9)
+
+# ---------- Two-dataset combinations: a signal from each of two different datasets ----------
+group_rank(ts_mean(ts_backfill({field}, 63), {window}), {group}) + group_rank(ts_mean(ts_backfill({field2}, 63), {window}), {group})
+rank(ts_backfill({field}, 63)) * rank(ts_backfill({field2}, 63))
+
+# ---------- Vector fields (need vec_avg / vec_sum; about 1,000 fields not used before) ----------
+group_rank(vec_avg({vfield}), {group})
+group_rank(ts_delta(vec_avg({vfield}), {window}), {group})

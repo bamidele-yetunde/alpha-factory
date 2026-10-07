@@ -1,0 +1,26 @@
+# Secrets - never commit
+credentials.json
+.state_key
+telegram.json
+
+# Private results: only ever stored encrypted (state.enc on the "state" branch)
+results.csv
+checks.csv
+submissions.csv
+submitted_alphas.csv
+fields.csv
+READY_TO_SUBMIT.csv
+insights.md
+activity_log.txt
+sweep_state.json
+run_output.txt
+notified.json
+state.enc
+*.log
+cycle*.log
+
+# Local-only documentation and tools (contain alpha IDs / expressions)
+README.md
+battery_guard.ps1
+
+__pycache__/
