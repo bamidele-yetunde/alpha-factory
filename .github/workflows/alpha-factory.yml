@@ -1,7 +1,9 @@
 name: alpha-factory
 
-# Runs the alpha tool on GitHub's servers around the clock: a run starts every hour; if one is
-# still going, the next waits for it. Each run works for up to ~4.5 hours, saving every ~40 minutes.
+# Runs the alpha tool on GitHub's servers around the clock. Each run queues the next one as soon as
+# it starts (it waits until this one ends), so the chain never stops; the hourly schedule is only a
+# backup (GitHub never fired it on 2026-10-07). Each run works ~4.5 hours, saving every ~40 minutes.
+# To stop everything: Actions tab -> alpha-factory -> "..." -> Disable workflow.
 on:
   schedule:
     - cron: "7 * * * *"
@@ -13,6 +15,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write   # to queue the next run
 
 jobs:
   run:
@@ -29,6 +32,8 @@ jobs:
       TZ: "Africa/Lagos"    # log and message times in your local time (UTC+1)
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: main   # a queued run uses the latest code, not the code from when it was queued
 
       - uses: actions/setup-python@v6
         with:
@@ -45,6 +50,12 @@ jobs:
           git show origin/state:state.enc > state.enc
           python state_crypt.py unpack
           test -f results.csv
+
+      # Only once the state has loaded: a broken run must not requeue itself in a tight loop.
+      - name: Queue the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run alpha-factory.yml --ref main -R "${{ github.repository }}" || echo "could not queue the next run (the hourly schedule is the backup)"
 
       - name: Work and save (encrypted) every ~40 minutes
         run: |
@@ -90,3 +101,7 @@ jobs:
               sleep 20
             done
           fi
+
+      - name: Alert if the run failed
+        if: failure()
+        run: python -c "from notify import telegram; telegram('❌ Alpha bot: a GitHub run failed (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). If no heartbeat arrives within 2 hours, the bot has stopped.')" || true
