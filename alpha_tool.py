@@ -160,26 +160,16 @@ def write_reports(cfg):
     know.write_insights(INSIGHTS)
     before = {r["alpha_id"] for r in load_csv(READY)}
     ready = know.shortlist(200, all_passes=True)
-    from notify import block, code, esc, telegram
+    from notify import code, esc, telegram
     for r in ready:
         if r["alpha_id"] not in before:
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}) {r['expression']} {r['settings']}")
             risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
-            s = json.loads(r["settings"] or "{}")
-            full = {**cfg["settings"], **s}
-            settings_line = (f"{full.get('universe')} | decay {full.get('decay')} | "
-                             f"neutralization {full.get('neutralization')} | truncation {full.get('truncation')}")
             telegram("\n".join([
                 f"✅ NEW PASS: {code(r['alpha_id'])}{risk}",
                 f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])} | "
                 f"Family {esc(r['family'])}",
-                "",
-                "Tap the ID above to copy it, then on BRAIN: Alphas > Unsubmitted > search > Submit.",
-                "",
-                "Expression (tap to copy):",
-                block(r["expression"]),
-                f"Settings: {code(settings_line)}",
                 "(Submit one per family at a time.)"]))
     for alpha_id in before - {r["alpha_id"] for r in ready}:
         if alpha_id in know.submitted:
