@@ -37,13 +37,20 @@ def block(text):
 
 def telegram(text):
     """Send an HTML message. Plain parts must be passed through esc()."""
+    import time
     token, chat = _settings()
     if not (token and chat):
         return False
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat, "text": text, "parse_mode": "HTML",
-                                "disable_web_page_preview": True}, timeout=20)
-        return r.ok
-    except requests.RequestException:
-        return False
+    for attempt in range(3):  # a missed pass alert is costly: retry network blips
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                    "disable_web_page_preview": True}, timeout=30)
+            if r.ok:
+                return True
+            if r.status_code == 400:
+                return False  # bad message (e.g. formatting): retrying won't help
+        except requests.RequestException:
+            pass
+        time.sleep(5 * (attempt + 1))
+    return False
