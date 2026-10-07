@@ -113,7 +113,8 @@ class Brain:
         r = self.request("POST", "/simulations", json=payload)
         if r.status_code != 201:
             raise BrainError(f"Simulation rejected ({r.status_code}): {r.text[:300]}")
-        result = self._wait(r.headers["Location"]).json()
+        # A simulation stuck on BRAIN's side must not hang the whole run (it did on 2026-10-07).
+        result = self._wait(r.headers["Location"], max_seconds=20 * 60).json()
         if "alpha" not in result:
             raise BrainError(result.get("message") or f"status {result.get('status')}")
         return self.alpha(result["alpha"])
@@ -136,7 +137,7 @@ class Brain:
         return result.get("checks", []), table(result.get("selfCorrelated"))
 
     def yearly_stats(self, alpha_id):
-        r = self._wait(f"{API}/alphas/{alpha_id}/recordsets/yearly-stats")
+        r = self._wait(f"{API}/alphas/{alpha_id}/recordsets/yearly-stats", max_seconds=5 * 60)
         if r.status_code != 200:
             raise BrainError(f"No yearly stats for {alpha_id} ({r.status_code}): {r.text[:200]}")
         return table(r.json())

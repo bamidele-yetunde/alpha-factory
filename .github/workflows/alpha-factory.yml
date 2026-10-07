@@ -57,7 +57,8 @@ jobs:
           }
           end=$((SECONDS + 280*60))
           while [ $SECONDS -lt $end ]; do
-            python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || echo "run step failed (details are in the encrypted log)"
+            # Hard cap per chunk: even if something hangs, progress is still saved and the loop goes on.
+            timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || echo "run step failed or timed out (details are in the encrypted log)"
             save
             echo "saved at $(date -u +%H:%M) UTC"
           done
