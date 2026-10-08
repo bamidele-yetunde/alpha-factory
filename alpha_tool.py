@@ -422,7 +422,9 @@ def run_cycle(cfg, dry_run=False):
     log(f"=== Cycle {cycle}: simulating {len(early)} repairs waiting from earlier cycles")
     if early:
         simulate_jobs(early, cfg, cycle)
-    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas")
+    explore = [j for j in new if j["repair"] == "explore"]
+    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(explore)} on never-tried fields: "
+        f"{', '.join(sorted({j['dataset'] for j in explore})) or 'none left'})")
     if new:
         simulate_jobs(new, cfg, cycle)
     verify_pending(cfg)
@@ -434,6 +436,7 @@ def run_cycle(cfg, dry_run=False):
     repairs = early + repairs
 
     know = write_reports(cfg)
+    exploration_report(know, cfg)
     this = [r for r in know.sims if r["cycle"] == str(cycle)]
     passed = sum(r["passed"] == "True" for r in this)
     log(f"=== Cycle {cycle} done: {passed}/{len(this)} verified passes. Feedback written to {INSIGHTS.name}")
@@ -482,6 +485,7 @@ def choose_seed(know, cfg, state):
     for r in sorted(know.sims, key=lambda r: abs(num(r["sharpe"])), reverse=True):
         if (abs(num(r["sharpe"])) < cfg.get("sweep_seed_min_sharpe", 1.0) or r["alpha_id"] in swept
                 or r["passed"] == "True" or r["repair"].startswith("sweep") or one_sided(r)
+                or know.burned(r["expression"])
                 or (r["window"] and int(r["window"]) not in cfg["search"]["windows"])  # retired short windows
                 or num(know.checks.get(r["alpha_id"], {}).get("self_corr"), 0) >= 0.8
                 or fields_in(r["expression"]) & know.submitted_fields):
@@ -560,20 +564,93 @@ def run_sweep_cycle(cfg):
 
 
 def cmd_fields(args):
+    add_datasets(args.datasets)
+
+
+def add_datasets(datasets):
+    """Download the data fields of these datasets into fields.csv. Returns {dataset: field count}."""
     cfg = load_config()["settings"]
     existing = {r["id"]: r for r in load_csv(FIELDS)}
-    for dataset in args.datasets:
+    counts = {}
+    for dataset in datasets:
         fields = brain().data_fields(cfg["region"], cfg["universe"], cfg["delay"], dataset)
         for fd in fields:
             existing[fd["id"]] = {"id": fd["id"], "dataset": (fd.get("dataset") or {}).get("id", dataset),
                                   "type": fd.get("type"), "coverage": fd.get("coverage"),
                                   "alpha_count": fd.get("alphaCount"), "description": fd.get("description")}
         log(f"{dataset}: {len(fields)} fields")
+        counts[dataset] = len(fields)
     with FIELDS.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELD_COLUMNS)
         writer.writeheader()
         writer.writerows(existing.values())
     log(f"{FIELDS.name} now has {len(existing)} fields")
+    return counts
+
+
+def load_notified():
+    try:
+        return json.loads(NOTIFIED.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_notified(state):
+    NOTIFIED.write_text(json.dumps(state), encoding="utf-8")
+
+
+def discover_datasets(cfg):
+    """Once a day (`dataset_check_hours`): ask BRAIN which datasets your account can use and add any
+    new ones to fields.csv, so new families get explored as soon as BRAIN unlocks them."""
+    from brain import BrainError
+    from notify import code, esc, telegram
+    state = load_notified()
+    last = state.get("datasets_checked_at")
+    if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < cfg.get("dataset_check_hours", 24) * 3600:
+        return
+    st = cfg["settings"]
+    try:
+        found, params = [], {"instrumentType": st["instrumentType"], "region": st["region"], "delay": st["delay"],
+                             "universe": st["universe"], "limit": 50, "offset": 0}
+        while True:
+            r = brain().request("GET", "/data-sets", params=params)
+            if r.status_code != 200:
+                raise BrainError(f"data-sets {r.status_code}")
+            data = r.json()
+            found += data["results"]
+            params["offset"] += params["limit"]
+            if not data["results"] or params["offset"] >= data["count"]:
+                break
+        known = {r["dataset"] for r in load_csv(FIELDS)}
+        new = [d["id"] for d in found if d["id"] not in known]
+        if new:
+            counts = add_datasets(new)
+            log(f"NEW DATASETS from BRAIN: {counts} - their fields are now explored")
+            telegram("🆕 New BRAIN data available to your account: "
+                     + ", ".join(f"{code(d)} ({n} fields)" for d, n in counts.items())
+                     + "\nThe bot has started exploring it.")
+        else:
+            log(f"Dataset check: no new datasets ({len(found)} available, all known)")
+    except (BrainError, KeyError, ValueError) as e:
+        log(f"Dataset check failed, will retry next run: {str(e)[:120]}")
+        return
+    state = load_notified()
+    state["datasets_checked_at"] = datetime.now().isoformat(timespec="seconds")
+    save_notified(state)
+
+
+def exploration_report(know, cfg):
+    """Log fields that became burned (worn out by self-correlation) since the last report."""
+    state = load_notified()
+    before = set(state.get("burned", []))
+    newly = sorted(know.burned_fields - before)
+    for f in newly:
+        n, k = know.field_corr[f]
+        log(f"BURNED FIELD: {f} - {k} of {n} checked alphas using it were too similar to your submissions; "
+            "no longer used in new ideas, combinations or repairs")
+    if newly or set(state.get("burned", [])) != know.burned_fields:
+        state["burned"] = sorted(know.burned_fields)
+        save_notified(state)
 
 
 def cmd_cycle(args):
@@ -610,6 +687,7 @@ def heartbeat(cfg):
     ready = [r["alpha_id"] for r in load_csv(READY)]
     submitted = {s["id"] for s in load_csv(SUBMITTED)} & {r["alpha_id"] for r in know.sims}
     sweep = load_sweep_state().get("current") if cfg.get("mode") == "sweep" else None
+    all_fields = {f for f, _, _ in load_fields(cfg)}
     working_on = f"sweep of {sweep['expression'][:60]}..." if sweep else f"{cfg.get('mode', 'normal')} cycles"
     lines = [f"\U0001F493 Alpha bot alive - {now:%H:%M}"]
     if last:
@@ -617,6 +695,8 @@ def heartbeat(cfg):
                      f"{len(verified) - state.get('verified', 0)} new verified passes")
     lines += [f"Ready to submit: {len(ready)}" + (f" ({', '.join(code(a) for a in ready[:5])})" if ready else ""),
               f"Working on: {esc(working_on)}",
+              f"Explored: {len(know.tried_fields & all_fields)} of {len(all_fields)} data fields; "
+              f"{len(know.burned_fields)} worn-out fields skipped",
               f"Total submitted from the tool: {len(submitted)}"]
     if telegram("\n".join(lines)):
         state.update(heartbeat_at=now.isoformat(timespec="seconds"), sims=len(know.sims), verified=len(verified))
@@ -665,6 +745,7 @@ def cmd_run_for(args):
     import time
     end = time.time() + args.minutes * 60
     log(f"RUN: GitHub run started ({args.minutes} min)")
+    discover_datasets(load_config())
     watch_once(load_config())
     while time.time() < end:
         cfg = load_config()

@@ -261,6 +261,30 @@ class Knowledge:
         self.component_passes = Counter(f for r in self.sims if r["passed"] == "True"
                                         for f in fields_in(r["expression"]) - common)
 
+        # ---------- exploration: new families instead of the same worn-out ones ----------
+        # A field is "burned" when alphas using it keep failing self-correlation at the submission
+        # check: on 2026-10-08, growth_potential_rank_derivative failed 63 of 63 checks. Burned fields
+        # are left out of new ideas, combinations and repairs, so the budget goes to new families.
+        unique = list({r["alpha_id"]: r for r in self.sims}.values())
+        corr = defaultdict(lambda: [0, 0])  # field -> [complete checks, self-correlation failures]
+        for r in unique:
+            check = self.checks.get(r["alpha_id"])
+            if check and check["verdict"] in ("PASS", "FAIL"):
+                for f in fields_in(r["expression"]) - common:
+                    corr[f][0] += 1
+                    corr[f][1] += "SELF_CORRELATION" in check["failed"]
+        self.field_corr = dict(corr)
+        self.burned_fields = {f for f, (n, k) in corr.items()
+                              if n >= cfg.get("burn_after_checks", 4) and k / n >= cfg.get("burn_corr_rate", 0.8)}
+        # Every name ever simulated (incl. errors): anything else in fields.csv is an unexplored family.
+        self.tried_fields = set().union(*(fields_in(r["expression"]) for r in rows)) if rows else set()
+        # How often each field already went into a combination: fresh ingredients get priority.
+        self.combo_field_uses = Counter(f for r in unique if r["repair"] == "combine"
+                                        for f in fields_in(r["expression"]) - common)
+
+    def burned(self, expr):
+        return bool(fields_in(expr) & self.burned_fields)
+
     def check_is_stale(self, row, check):
         """True if this PASS was checked before BRAIN caught up with a submission sharing its data."""
         checked = parse_time(check.get("checked_at"))
@@ -322,33 +346,55 @@ class Knowledge:
         field_ids = known_fields or {f for f, _, _ in fields}
         saturated = {f: 0.2 for f, k in self.field_passes.items() if k >= cfg["max_passes_per_field"]}
         per_field = Counter()
+        banned_fields = self.burned_fields | self.submitted_fields
+        # Never-tried fields, not burned or used in your submissions, by type and dataset.
+        fresh = defaultdict(lambda: defaultdict(list))
+        for kind, by_dataset in pools.items():
+            for dataset, ids in by_dataset.items():
+                fresh[kind][dataset] = [f for f in ids if f not in self.tried_fields and f not in banned_fields]
 
-        def pick_field(kind, exclude_dataset=None):
+        def pick_field(kind, exclude_dataset=None, explore=False):
+            if explore:
+                # Even spread over datasets that still have unexplored fields, then a random one of them;
+                # no dataset gets more than a quarter of the exploration ideas in one cycle.
+                datasets = [d for d, ids in fresh[kind].items() if ids and d != exclude_dataset
+                            and explored_in[d] < max(2, n_explore // 4)]
+                if not datasets:
+                    return None, None
+                dataset = random.choice(sorted(datasets))
+                options = [f for f in fresh[kind][dataset] if per_field[f] == 0]
+                return (random.choice(options), dataset) if options else (None, None)
             datasets = [d for d in pools[kind] if d != exclude_dataset]
             if not datasets:
                 return None, None
             dataset = self.pick("dataset", allowed("dataset", sorted(datasets)))
             options = [f for f in allowed("field", pools[kind][dataset])
-                       if per_field[f] < cfg["max_per_field_per_cycle"]]
+                       if per_field[f] < cfg["max_per_field_per_cycle"] and f not in banned_fields]
             return (self.pick("field", options, saturated), dataset) if options else (None, None)
 
+        # `explore_share` of the new ideas go to never-tried fields (new families), the rest to what works.
+        n_explore = round(n * cfg.get("explore_share", 0.5))
+        explored_in = Counter()
         out, seen = [], set(done)
         for _ in range(n * 50):
             if len(out) >= n:
                 break
+            explore = sum(r["repair"] == "explore" for r in out) < n_explore
             template = self.pick("template", allowed("template", templates))
             names = placeholders(template)
             row = {"template": template, "field": "", "dataset": "", "window": "", "group": ""}
             fill = {}
+            if explore and not ({"field", "vfield"} & names):
+                continue  # an exploration idea needs a data-field slot to put the new field in
             if "field" in names or "vfield" in names:
                 kind, slot = ("MATRIX", "field") if "field" in names else ("VECTOR", "vfield")
-                fill[slot], row["dataset"] = pick_field(kind)
+                fill[slot], row["dataset"] = pick_field(kind, explore=explore)
                 row["field"] = fill[slot]
                 if not row["field"]:
                     continue
             if "field2" in names:
                 # Second signal from a different dataset: combinations rarely match anything submitted.
-                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"])
+                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"], explore=explore)
                 if not fill["field2"]:
                     continue
             # Universe first: smaller universes get their own groups, neutralisation, decay and truncation.
@@ -370,9 +416,16 @@ class Knowledge:
                 continue  # already tried, or same shape as something you submitted
             if operators and invalid_names(expr, field_ids, operators):
                 continue  # unknown field or operator: BRAIN would reject it
+            if self.burned(expr):
+                continue  # a research idea that names a worn-out field directly
             seen.add(key)
+            if explore:
+                explored_in[row["dataset"]] += 1
             per_field[row["field"]] += 1
-            out.append({**row, "expression": expr, "settings": settings, "repair": "", "parent": "", "depth": 0})
+            if "field2" in fill:
+                per_field[fill["field2"]] += 1
+            out.append({**row, "expression": expr, "settings": settings, "repair": "explore" if explore else "",
+                        "parent": "", "depth": 0})
         return out
 
     # ---------- repairing near-misses ----------
@@ -421,12 +474,15 @@ class Knowledge:
             # Related fields first (sharing a word with the original), then any unused field.
             words = set(field.lower().split("_")) - {"fnd6", "fn", "anl4", "a", "q", "value", "v1300"}
             pool = [f for f in fields_by_dataset[r["dataset"]]
-                    if f != field and f not in self.submitted_fields
+                    if f != field and f not in self.submitted_fields and f not in self.burned_fields
                     and self.field_passes[f] < self.cfg["max_passes_per_field"]]
             related = [f for f in pool if words & set(f.lower().split("_"))]
             random.shuffle(related)
             others = [f for f in pool if f not in related]
             random.shuffle(others)
+            # Never-tried fields first: a new family is the best chance of escaping the correlation.
+            related.sort(key=lambda f: f in self.tried_fields)
+            others.sort(key=lambda f: f in self.tried_fields)
             for f in (related[:2] + others[:1]):
                 yield re.sub(rf"\b{re.escape(field)}\b", f, expr), overrides, f
 
@@ -459,7 +515,10 @@ class Knowledge:
         for r in candidates:
             checks = [c for c in r["failed_checks"].split(";") if c in GATE_CHECKS]
             added = 0
-            for kind in self.rank_corr_repairs(checks):
+            kinds = self.rank_corr_repairs(checks)
+            if self.burned(r["expression"]):
+                kinds = [k for k in kinds if k == "field_swap"]  # only a different field can help
+            for kind in kinds:
                 for expr, settings, field in self.corr_variants(r, kind, fields_by_dataset):
                     if added >= cfg.get("corr_repairs_per_alpha", 10) or len(jobs) >= budget:
                         break
@@ -489,12 +548,18 @@ class Knowledge:
                 and set(filter(None, r["failed_checks"].split(";"))) <= ok_checks
                 and (not r["window"] or r["window"] in windows)
                 and r["field"] not in self.submitted_fields
+                and not self.burned(r["expression"])  # worn-out families only give correlated combinations
                 and json.loads(r["settings"] or "{}").get("universe", "TOP3000") in combo_universes
                 # Components already in enough verified passes would only make more of the same family.
                 and not any(self.component_passes[f] >= cfg["max_passes_per_field"]
                             for f in fields_in(r["expression"]))
                 and 0.01 <= num(r["turnover"]) <= 0.6]
-        pool.sort(key=lambda r: abs(num(r["sharpe"])), reverse=True)
+        # Strongest first, but ingredients already used in many combinations count for less, so new
+        # families keep getting paired instead of the same few (`combo_field_fatigue` uses halve the score).
+        fatigue = cfg.get("combo_field_fatigue", 5)
+        common = {"cap", "returns", "close", "volume"}
+        uses = lambda r: max((self.combo_field_uses[f] for f in fields_in(r["expression"]) - common), default=0)
+        pool.sort(key=lambda r: abs(num(r["sharpe"])) / (1 + uses(r) / fatigue), reverse=True)
         best = {}  # one per idea+field: repaired copies of the same alpha would only duplicate it
         for r in pool:
             best.setdefault((r["template"], r["field"]), r)
@@ -560,6 +625,7 @@ class Knowledge:
                       and (focus is None or r["alpha_id"] in focus)
                       and not set(r["failed_checks"].split(";")) & GATE_CHECKS
                       and self.repairable_universe(r)
+                      and not self.burned(r["expression"])
                       and (focus or not r["window"] or r["window"] in windows)  # skip retired windows
                       and int(r["depth"] or 0) < max_depth
                       and abs(num(r["sharpe"])) >= min_sharpe

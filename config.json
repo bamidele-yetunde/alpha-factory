@@ -166,5 +166,10 @@
     "TOP3000",
     "TOP2000"
   ],
-  "retry_check_minutes": 30
+  "retry_check_minutes": 30,
+  "explore_share": 0.5,
+  "burn_after_checks": 4,
+  "burn_corr_rate": 0.8,
+  "combo_field_fatigue": 5,
+  "dataset_check_hours": 24
 }
