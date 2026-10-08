@@ -191,9 +191,12 @@ class Knowledge:
         self.recent_submissions = [(parse_time(a.get("submitted_at")), fields_in(a["code"]) - common)
                                    for a in submitted_alphas if parse_time(a.get("submitted_at"))]
         # The latest verification of each alpha decides whether its in-sample pass is genuine.
+        # An errored check (RETRY) says nothing new, so it only counts while there is no complete one:
+        # on 2026-10-08 BRAIN errors hid 2 verified passes for hours (both were then submitted fine).
         self.checks = {}
         for c in checks:
-            self.checks[c["alpha_id"]] = c
+            if c["verdict"] != "RETRY" or self.checks.get(c["alpha_id"], {}).get("verdict") in (None, "RETRY"):
+                self.checks[c["alpha_id"]] = c
         rows = [self._apply_check(r) for r in rows]
         self.rows = rows
         self.sims = [r for r in rows if r["alpha_id"]]
