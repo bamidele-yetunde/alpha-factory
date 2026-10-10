@@ -24,7 +24,7 @@ HERE = Path(__file__).parent
 STATE = HERE / "state.enc"
 PRIVATE_FILES = ["results.csv", "checks.csv", "submissions.csv", "submitted_alphas.csv", "fields.csv",
                  "READY_TO_SUBMIT.csv", "insights.md", "activity_log.txt", "sweep_state.json",
-                 "run_output.txt", "notified.json"]
+                 "run_output.txt", "notified.json", "pnl_cache.json.gz"]
 
 
 def key():

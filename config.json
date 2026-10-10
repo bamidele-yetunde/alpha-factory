@@ -167,9 +167,14 @@
     "TOP2000"
   ],
   "retry_check_minutes": 30,
-  "explore_share": 0.5,
+  "explore_share": 0.7,
   "burn_after_checks": 4,
   "burn_corr_rate": 0.8,
   "combo_field_fatigue": 5,
-  "dataset_check_hours": 24
+  "dataset_check_hours": 24,
+  "corr_limit": 0.7,
+  "basket_corr_limit": 0.65,
+  "combo_ingredient_max_corr": 0.7,
+  "combo_predicted_corr_max": 0.65,
+  "verify_budget_minutes": 15
 }

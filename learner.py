@@ -374,18 +374,24 @@ class Knowledge:
 
         # `explore_share` of the new ideas go to never-tried fields (new families), the rest to what works.
         n_explore = round(n * cfg.get("explore_share", 0.5))
+        slot_templates = [t for t in templates if {"field", "vfield"} & placeholders(t)]
+        if not slot_templates:
+            n_explore = 0
         explored_in = Counter()
         out, seen = [], set(done)
-        for _ in range(n * 50):
+        for attempt in range(n * 50):
             if len(out) >= n:
                 break
-            explore = sum(r["repair"] == "explore" for r in out) < n_explore
-            template = self.pick("template", allowed("template", templates))
+            # Exploration gets the first half of the attempts; if it can't fill its quota by then,
+            # the rest of the ideas come from proven areas (on 2026-10-09 cycles made only 1-6 ideas).
+            explore = sum(r["repair"] == "explore" for r in out) < n_explore and attempt < n * 25
+            # An exploration idea needs a template with a data-field slot to put the new field in. Pick
+            # among those only: by 2026-10-10 the learner preferred the research ideas (fields written
+            # in) so strongly that it chose a slot template 0 times in 2000, and exploration stopped.
+            template = self.pick("template", allowed("template", slot_templates if explore else templates))
             names = placeholders(template)
             row = {"template": template, "field": "", "dataset": "", "window": "", "group": ""}
             fill = {}
-            if explore and not ({"field", "vfield"} & names):
-                continue  # an exploration idea needs a data-field slot to put the new field in
             if "field" in names or "vfield" in names:
                 kind, slot = ("MATRIX", "field") if "field" in names else ("VECTOR", "vfield")
                 fill[slot], row["dataset"] = pick_field(kind, explore=explore)
@@ -563,7 +569,22 @@ class Knowledge:
         best = {}  # one per idea+field: repaired copies of the same alpha would only duplicate it
         for r in pool:
             best.setdefault((r["template"], r["field"]), r)
-        pool = list(best.values())[:cfg.get("combo_pool", 25)]
+        pool = list(best.values())
+        corr_of = getattr(self, "corr_to_submitted", None)
+        if corr_of:
+            # Exact check of each ingredient against your submissions (daily profits): one that
+            # already copies a submitted alpha can't make a combination that doesn't.
+            limit, kept = cfg.get("combo_ingredient_max_corr", 0.7), []
+            for r in pool[:cfg.get("combo_pool", 25) * 2]:
+                c = corr_of(r["alpha_id"])
+                if c is None or c < limit:
+                    kept.append(r)
+                if len(kept) >= cfg.get("combo_pool", 25):
+                    break
+            pool = kept
+        pool = pool[:cfg.get("combo_pool", 25)]
+        predict = getattr(self, "predict_combo_corr", None)
+        self.combo_skipped = 0
         jobs = []
         # Strongest pairs first, but spread out: pair (0,1), (0,2), (1,2), (0,3), (1,3)...
         pairs = sorted(((i, j) for i in range(len(pool)) for j in range(i + 1, len(pool))),
@@ -589,6 +610,15 @@ class Knowledge:
             key = (expr, json.dumps(settings, sort_keys=True))
             if key in seen or skeleton(expr) in self.submitted_shapes:
                 continue
+            if predict:
+                # Predicted correlation with your submissions from the two ingredients' daily profits
+                # (median error 0.015 against BRAIN on 30 past combinations): skip likely copies.
+                sign = lambda r: 1 if num(r["sharpe"]) > 0 else -1
+                pred = predict([(a["alpha_id"], sign(a)), (b["alpha_id"], sign(b))])
+                if pred is not None and pred >= cfg.get("combo_predicted_corr_max", 0.65):
+                    seen.add(key)
+                    self.combo_skipped += 1
+                    continue
             seen.add(key)
             used[i] += 1
             used[j] += 1

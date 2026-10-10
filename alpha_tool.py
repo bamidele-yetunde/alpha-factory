@@ -59,11 +59,12 @@ RESULT_COLUMNS = ["cycle", "expression", "settings", "template", "field", "datas
 SUBMISSION_COLUMNS = ["alpha_id", "field", "status", "failed_checks"]
 FIELD_COLUMNS = ["id", "dataset", "type", "coverage", "alpha_count", "description"]
 CHECK_COLUMNS = ["alpha_id", "checked_at", "verdict", "failed", "self_corr", "corr_with", "yearly_sharpe", "detail"]
-SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at"]
+SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at", "sharpe"]
 
 ACTIVITY_LOG = HERE / "activity_log.txt"
 
 _brain = None
+_book = None
 _log_lock = threading.Lock()
 
 
@@ -83,6 +84,15 @@ def brain():
         from brain import Brain
         _brain = Brain()
     return _brain
+
+
+def pnl_book():
+    """Daily profit records (cached in pnl_cache.json.gz) for exact self-correlation checks."""
+    global _book
+    if _book is None:
+        from pnl import PnlBook
+        _book = PnlBook(brain)
+    return _book
 
 
 def load_config():
@@ -151,48 +161,92 @@ def report_invalid_ideas(templates):
 
 
 def knowledge(cfg):
-    return Knowledge(load_csv(RESULTS), load_csv(SUBMISSIONS), cfg, load_csv(CHECKS), load_csv(SUBMITTED))
+    know = Knowledge(load_csv(RESULTS), load_csv(SUBMISSIONS), cfg, load_csv(CHECKS), load_csv(SUBMITTED))
+    # Exact correlations from daily profits (fetched lazily, only when a plan asks for them).
+    subs = [s["id"] for s in load_csv(SUBMITTED)]
+    know.corr_to_submitted = lambda alpha_id: pnl_book().max_corr(alpha_id, subs)[0]
+    know.predict_combo_corr = lambda parts: (lambda blend: pnl_book().series_max_corr(blend, subs)[0]
+                                             if blend else None)(pnl_book().blend_signed(parts))
+    return know
+
+
+def build_basket(candidates, cfg):
+    """Strongest first, keep an alpha only if it is below `basket_corr_limit` (0.65) with every alpha
+    already kept and passes the exact check against all your submissions: everything in the basket
+    can be submitted together, in any order. Returns (basket, backups, now_failing)."""
+    book, limit = pnl_book(), cfg.get("basket_corr_limit", 0.65)
+    basket, backups, failing = [], {}, {}
+    for r in candidates:  # shortlist order = best fitness first
+        corr, closest, blocked = corr_screen(r["alpha_id"], cfg)
+        if blocked:
+            failing[r["alpha_id"]] = (corr, closest)
+            continue
+        clash = max(((book.corr(r["alpha_id"], b["alpha_id"]) or 0, b["alpha_id"]) for b in basket),
+                    default=(0, ""))
+        if clash[0] >= limit:
+            backups[r["alpha_id"]] = clash
+            continue
+        basket.append({**r, "self_corr": round(corr, 4) if corr is not None else r["self_corr"]})
+    return basket, backups, failing
 
 
 def write_reports(cfg):
-    """Rewrite insights.md and READY_TO_SUBMIT.csv (verified alphas not yet submitted)."""
+    """Rewrite insights.md and READY_TO_SUBMIT.csv: the basket of verified alphas that can all be
+    submitted together (each below 0.7 with your submissions and below 0.65 with each other)."""
     know = knowledge(cfg)
     know.write_insights(INSIGHTS)
     before = {r["alpha_id"] for r in load_csv(READY)}
-    ready = know.shortlist(200, all_passes=True)
+    ready, backups, failing = build_basket(know.shortlist(200, all_passes=True), cfg)
+    now = datetime.now().isoformat(timespec="seconds")
+    if failing:
+        # A new submission made these too similar: record it so they leave the list for good.
+        append_csv(CHECKS, CHECK_COLUMNS, [
+            {"alpha_id": a, "checked_at": now, "verdict": "FAIL", "failed": "SELF_CORRELATION",
+             "self_corr": round(c, 4), "corr_with": w,
+             "detail": f"SELF_CORRELATION value={round(c, 4)} limit=0.7 with {w} (exact PnL check after a submission)"}
+            for a, (c, w) in failing.items()])
     from notify import code, esc, telegram
     for r in ready:
         if r["alpha_id"] not in before:
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
-                f"self-corr={r['self_corr']}) {r['expression']} {r['settings']}")
+                f"self-corr={r['self_corr']}; basket now {len(ready)}) {r['expression']} {r['settings']}")
             risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
             telegram("\n".join([
                 f"✅ NEW PASS: {code(r['alpha_id'])}{risk}",
-                f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])} | "
-                f"Family {esc(r['family'])}",
-                "(Submit one per family at a time.)"]))
+                f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])}",
+                f"Ready list: {len(ready)} - all can be submitted together, in any order."]))
     for alpha_id in before - {r["alpha_id"] for r in ready}:
         if alpha_id in know.submitted:
             reason = "submitted"
-        elif know.checks.get(alpha_id, {}).get("verdict") == "RETRY":
-            reason = "BRAIN's check errored; hidden until a complete check passes"
+        elif alpha_id in failing:
+            c, w = failing[alpha_id]
+            reason = f"now too similar to your submission {w} ({c:.2f})"
+        elif alpha_id in backups:
+            c, w = backups[alpha_id]
+            reason = f"replaced by {w}, a stronger alpha making the same bet ({c:.2f}); kept as a backup"
         elif know.checks.get(alpha_id, {}).get("verdict") == "PASS":
-            reason = (f"hidden for {cfg.get('submission_lag_minutes', 45)} min because you submitted a related "
-                      "alpha and BRAIN is slow to count it; re-checked after that")
+            reason = "being re-checked against a submission you just made"
         else:
             reason = "no longer passes verification"
         log(f"READY TO SUBMIT: {alpha_id} removed ({reason})")
         if reason != "submitted":
             telegram(f"⚠️ {code(alpha_id)} removed from the ready list: {esc(reason)}. Don't submit it now.")
+    if backups and set(backups) != set(json.loads(load_notified().get("backups_logged", "[]"))):
+        log(f"BASKET: {len(ready)} alphas submittable together; {len(backups)} backups making the same bet as "
+            f"one of them: {', '.join(f'{a} ({w} {c:.2f})' for a, (c, w) in list(backups.items())[:8])}")
+        state = load_notified()
+        state["backups_logged"] = json.dumps(sorted(backups))
+        save_notified(state)
     with READY.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["alpha_id", "family", "best_in_family", "risky", "sharpe", "fitness", "turnover",
                          "self_corr", "yearly_sharpe", "verified_at", "expression", "settings"])
-        for r in sorted(ready, key=lambda r: (r["family"], not r["best_in_family"])):
+        for n, r in enumerate(ready, 1):
             check = know.checks[r["alpha_id"]]
-            writer.writerow([r["alpha_id"], r["family"], "yes" if r["best_in_family"] else "no", r["risky"],
-                             r["sharpe"], r["fitness"], r["turnover"], check["self_corr"],
-                             check["yearly_sharpe"], check["checked_at"], r["expression"], r["settings"]])
+            writer.writerow([r["alpha_id"], n, "yes", r["risky"], r["sharpe"], r["fitness"], r["turnover"],
+                             r["self_corr"], check["yearly_sharpe"], check["checked_at"], r["expression"],
+                             r["settings"]])
+    pnl_book().save()
     return know
 
 
@@ -217,26 +271,32 @@ def sync_submitted():
             writer.writerow({"id": a["id"], "code": (a.get("regular") or {}).get("code", ""),
                              "universe": s.get("universe"), "decay": s.get("decay"),
                              "neutralization": s.get("neutralization"),
-                             "submitted_at": a.get("dateSubmitted") or ""})
+                             "submitted_at": a.get("dateSubmitted") or "",
+                             "sharpe": (a.get("is") or {}).get("sharpe", "")})
 
 
-def verify(alpha_id, cfg):
-    """BRAIN's submission check (incl. self-correlation) plus a year-by-year robustness test.
+def corr_screen(alpha_id, cfg):
+    """Exact self-correlation against every submitted alpha, from daily profits (matches BRAIN's
+    number). Returns (highest corr, with which alpha, blocked). Not blocked at >= 0.7 only when BRAIN's
+    exception might apply (Sharpe >= 10% above every submitted alpha it correlates with); BRAIN decides."""
+    from learner import num
+    subs = {s["id"]: num(s.get("sharpe"), 0) for s in load_csv(SUBMITTED)}
+    book, limit = pnl_book(), cfg.get("corr_limit", 0.7)
+    corrs = {o: book.corr(alpha_id, o) for o in subs if o != alpha_id}
+    corrs = {o: c for o, c in corrs.items() if c is not None}
+    if not corrs:
+        return None, "", False
+    closest = max(corrs, key=corrs.get)
+    over = [o for o, c in corrs.items() if c >= limit]
+    if not over:
+        return corrs[closest], closest, False
+    mine = abs(next((num(r["sharpe"]) for r in load_csv(RESULTS) if r["alpha_id"] == alpha_id), 0))
+    exception = all(subs[o] > 0 and mine >= 1.1 * subs[o] for o in over)
+    return corrs[closest], closest, not exception
 
-    Returns a checks.csv row, or None if BRAIN has not finished checking yet.
-    """
-    checks, correlated = brain().check(alpha_id)
-    if any(c.get("result") in ("PENDING", "ERROR") for c in checks):
-        return None  # BRAIN hasn't finished, or its check errored: not verified, retry later
-    self_check = next((c for c in checks if c["name"] == "SELF_CORRELATION"), None)
-    if self_check is None or self_check.get("value") is None:
-        return None  # no correlation value: not verified, retry later
-    failed = [c["name"] for c in checks if c.get("result") == "FAIL"]
-    details = [f"{c['name']} value={c.get('value')} limit={c.get('limit')}"
-               for c in checks if c.get("result") == "FAIL"]
-    self_corr = next((c.get("value") for c in checks if c["name"] == "SELF_CORRELATION"), None)
-    top = max(correlated, key=lambda a: a.get("correlation") or -1, default={})
 
+def robustness(alpha_id, cfg):
+    """Year-by-year in-sample Sharpe and our robustness problems with it."""
     rules = cfg["robustness"]
     sharpes = [y["sharpe"] for y in brain().yearly_stats(alpha_id)
                if y.get("stage", "IS") == "IS" and y.get("sharpe") is not None]
@@ -248,17 +308,64 @@ def verify(alpha_id, cfg):
         problems.append(f"worst year Sharpe {min(sharpes)}")
     if sharpes and sharpes[-1] < rules["min_last_year_sharpe"]:
         problems.append(f"last year Sharpe {sharpes[-1]}")
+    return sharpes, problems
+
+
+def verify(alpha_id, cfg, brain_allowed=True):
+    """Self-correlation (exact, from daily profits) and robustness first; BRAIN's own submission
+    check only for alphas that pass both, since BRAIN's check is slow (often minutes).
+
+    Returns a checks.csv row, None if BRAIN has not finished checking yet, or "WAIT" when it passed
+    the fast checks but BRAIN may not be asked yet (brain_allowed=False: backing off after timeouts).
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    corr, closest, blocked = corr_screen(alpha_id, cfg)
+    sharpes, problems = robustness(alpha_id, cfg)
+    local = round(corr, 4) if corr is not None else ""
+    failed, details = [], []
+    if blocked:
+        failed.append("SELF_CORRELATION")
+        details.append(f"SELF_CORRELATION value={local} limit={cfg.get('corr_limit', 0.7)} with {closest} "
+                       "(exact PnL check; BRAIN check skipped)")
+    if problems and (blocked or cfg.get("robustness_mode", "block") != "warn"):
+        failed.append("NOT_ROBUST")
+        details.append("NOT_ROBUST " + ", ".join(problems))
+    if failed:
+        return {"alpha_id": alpha_id, "checked_at": now, "verdict": "FAIL", "failed": ";".join(failed),
+                "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
+                "detail": "; ".join(details)}
+
+    # Passed BRAIN before and only re-checked because you submitted something since: the exact
+    # PnL check against every submission (incl. the new one) is enough, no need to wait for BRAIN.
+    earlier = [c for c in load_csv(CHECKS) if c["alpha_id"] == alpha_id and c["verdict"] in ("PASS", "FAIL")]
+    if earlier and earlier[-1]["verdict"] == "PASS" and corr is not None:
+        return {"alpha_id": alpha_id, "checked_at": now, "verdict": "PASS", "failed": "",
+                "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
+                "detail": "re-confirmed by exact PnL check against all submissions"}
+
+    if not brain_allowed:
+        return "WAIT"
+    checks, correlated = brain().check(alpha_id)
+    if any(c.get("result") in ("PENDING", "ERROR") for c in checks):
+        return None  # BRAIN hasn't finished, or its check errored: not verified, retry later
+    self_check = next((c for c in checks if c["name"] == "SELF_CORRELATION"), None)
+    if self_check is None or self_check.get("value") is None:
+        return None  # no correlation value: not verified, retry later
+    failed = [c["name"] for c in checks if c.get("result") == "FAIL"]
+    details = [f"{c['name']} value={c.get('value')} limit={c.get('limit')}"
+               for c in checks if c.get("result") == "FAIL"]
+    self_corr = self_check.get("value")
+    top = max(correlated, key=lambda a: a.get("correlation") or -1, default={})
     if problems:
         failed.append("NOT_ROBUST")
         details.append("NOT_ROBUST " + ", ".join(problems))
-
-    return {"alpha_id": alpha_id, "checked_at": datetime.now().isoformat(timespec="seconds"),
+    return {"alpha_id": alpha_id, "checked_at": now,
             "verdict": "FAIL" if failed else "PASS", "failed": ";".join(failed),
             "self_corr": self_corr, "corr_with": top.get("id", ""),
             "yearly_sharpe": json.dumps(sharpes), "detail": "; ".join(details)}
 
 
-def verify_and_record(alpha_ids, cfg, sync_each=False):
+def verify_and_record(alpha_ids, cfg, sync_each=False, deadline=None, local_only=()):
     """Verify alphas, save each result to checks.csv, return {alpha_id: row}.
 
     sync_each: refresh your submissions and the ready list after every check, so a submission
@@ -266,19 +373,24 @@ def verify_and_record(alpha_ids, cfg, sync_each=False):
     """
     from brain import BrainBusy, BrainError
     results = {}
+    import time
     for i, alpha_id in enumerate(alpha_ids, 1):
+        if deadline and time.time() > deadline:
+            log(f"  Verification time budget used up; {len(alpha_ids) - i + 1} alphas wait for the next round")
+            break
         safe_heartbeat(cfg)
         if sync_each and i > 1:
             sync_submitted()
             write_reports(cfg)
         try:
-            row = verify(alpha_id, cfg)
+            row = verify(alpha_id, cfg, brain_allowed=alpha_id not in local_only)
         except BrainBusy:
             row = None  # BRAIN took too long: treat like an errored check and retry later
         except BrainError as e:
             log(f"  [{i}/{len(alpha_ids)}] {alpha_id}: could not verify yet ({str(e)[:80]})")
             continue
-        if row is None:
+        if row == "WAIT":
+            continue  # passed the fast checks; BRAIN's check comes after the back-off
             # Unverified until a complete check comes back: keep it off the ready list meanwhile.
             append_csv(CHECKS, CHECK_COLUMNS, [{"alpha_id": alpha_id, "verdict": "RETRY",
                                                 "checked_at": datetime.now().isoformat(timespec="seconds"),
@@ -295,6 +407,7 @@ def verify_and_record(alpha_ids, cfg, sync_each=False):
             write_reports(cfg)  # show it in READY_TO_SUBMIT.csv straight away
     if results:
         write_reports(cfg)
+    pnl_book().save()
     return results
 
 
@@ -321,13 +434,20 @@ def verify_pending(cfg, sync_each=False):
         except ValueError:
             return True
 
-    waiting = [a for a in pending if not due(a)]
-    pending = [a for a in pending if due(a)]
-    if waiting and pending:
-        log(f"  ({len(waiting)} alphas whose BRAIN check keeps erroring are waiting before the next try)")
+    # Backing off only delays BRAIN's slow check: the fast exact checks still run for everyone.
+    waiting = {a for a in pending if not due(a)}
+    if waiting:
+        log(f"  ({len(waiting)} alphas whose BRAIN check timed out before get the fast checks only this round)")
+    # Earlier passes waiting for a re-check after a submission go first (re-confirmed in seconds),
+    # then the newest in-sample passes. A time budget keeps a slow BRAIN from eating the whole cycle.
+    passed_before = {c["alpha_id"] for c in load_csv(CHECKS) if c["verdict"] == "PASS"}
+    order = {a: i for i, a in enumerate(pending)}
+    pending.sort(key=lambda a: (a not in passed_before, -order[a]))
     if pending:
+        import time
         log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness)")
-        verify_and_record(pending, cfg, sync_each=sync_each)
+        verify_and_record(pending, cfg, sync_each=sync_each, local_only=waiting,
+                          deadline=time.time() + cfg.get("verify_budget_minutes", 15) * 60)
 
 
 def done_keys():
@@ -418,8 +538,10 @@ def run_cycle(cfg, dry_run=False):
         return True
 
     # Repairs waiting from earlier cycles go first: correlation repairs are the closest to a pass.
-    early = knowledge(cfg).plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg))
-    log(f"=== Cycle {cycle}: simulating {len(early)} repairs waiting from earlier cycles")
+    k = knowledge(cfg)
+    early = k.plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg))
+    log(f"=== Cycle {cycle}: simulating {len(early)} repairs waiting from earlier cycles"
+        f" ({getattr(k, 'combo_skipped', 0)} combinations skipped: predicted too similar to your submissions)")
     if early:
         simulate_jobs(early, cfg, cycle)
     explore = [j for j in new if j["repair"] == "explore"]
@@ -693,7 +815,8 @@ def heartbeat(cfg):
     if last:
         lines.append(f"Last {hours}h: {len(know.sims) - state.get('sims', 0)} simulations, "
                      f"{len(verified) - state.get('verified', 0)} new verified passes")
-    lines += [f"Ready to submit: {len(ready)}" + (f" ({', '.join(code(a) for a in ready[:5])})" if ready else ""),
+    lines += [f"Ready to submit: {len(ready)} (all can be submitted together)"
+              + (f" ({', '.join(code(a) for a in ready[:6])})" if ready else ""),
               f"Working on: {esc(working_on)}",
               f"Explored: {len(know.tried_fields & all_fields)} of {len(all_fields)} data fields; "
               f"{len(know.burned_fields)} worn-out fields skipped",
@@ -718,10 +841,9 @@ def watch_once(cfg):
     safe_heartbeat(cfg)
     try:
         sync_submitted()
-        write_reports(cfg)  # drop what you just submitted straight away
-        ready = [r["alpha_id"] for r in knowledge(cfg).shortlist(200, all_passes=True)]
-        log(f"Watcher: re-checking {len(ready)} ready alphas")
-        verify_and_record(ready, cfg, sync_each=True)
+        # Drop what you just submitted, and re-test every ready alpha against all your submissions
+        # with the exact PnL check (seconds, no slow BRAIN re-check needed).
+        write_reports(cfg)
         # Then alphas waiting for a check (incl. ones hidden after a related submission).
         verify_pending(cfg, sync_each=True)
         write_reports(cfg)

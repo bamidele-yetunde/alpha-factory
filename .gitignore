@@ -15,6 +15,7 @@ activity_log.txt
 sweep_state.json
 run_output.txt
 notified.json
+pnl_cache.json.gz
 state.enc
 *.log
 cycle*.log
