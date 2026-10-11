@@ -391,6 +391,7 @@ def verify_and_record(alpha_ids, cfg, sync_each=False, deadline=None, local_only
             continue
         if row == "WAIT":
             continue  # passed the fast checks; BRAIN's check comes after the back-off
+        if row is None:
             # Unverified until a complete check comes back: keep it off the ready list meanwhile.
             append_csv(CHECKS, CHECK_COLUMNS, [{"alpha_id": alpha_id, "verdict": "RETRY",
                                                 "checked_at": datetime.now().isoformat(timespec="seconds"),
