@@ -511,6 +511,16 @@ def summarize(alpha):
 def simulate_jobs(jobs, cfg, cycle):
     """Simulate jobs concurrently, appending each result to results.csv as soon as it finishes."""
     from brain import BrainBusy, BrainError
+    from learner import type_ok
+    # Last safety net, whatever made the idea: BRAIN rejects list fields outside vec_*(...) and vice versa.
+    kinds = {r["id"]: r["type"] for r in load_csv(FIELDS)}
+    bad = [j for j in jobs if not type_ok(j["expression"], kinds)]
+    if bad:
+        log(f"  Skipped {len(bad)} ideas BRAIN would reject (list field used as an ordinary one or the reverse), "
+            f"e.g. {bad[0]['expression'][:100]}")
+        jobs = [j for j in jobs if type_ok(j["expression"], kinds)]
+        if not jobs:
+            return
     client = brain()
     lock = threading.Lock()
 

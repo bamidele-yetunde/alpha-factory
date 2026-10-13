@@ -114,6 +114,21 @@ def fields_in(expr):
     return {t for t in re.findall(r"\b[a-z_][a-z0-9_]*\b(?!\s*[(=])", expr.lower()) if t not in GROUPS}
 
 
+def type_ok(expr, field_kind):
+    """List (VECTOR) fields only inside vec_*(...), and vec_*(...) only around list fields: anything
+    else BRAIN rejects ("status FAIL"). 2,365 simulations were lost this way by 2026-10-13, all from
+    field_swap putting an ordinary field into vec_avg(...)."""
+    low = expr.lower()
+    for m in re.finditer(r"\b([a-z_][a-z0-9_]*)\b(?!\s*\()", low):
+        kind = field_kind.get(m.group(1))
+        if kind not in ("MATRIX", "VECTOR"):
+            continue
+        inside_vec = re.search(r"vec_[a-z_]+\(\s*$", low[:m.start()]) is not None
+        if (kind == "VECTOR") != inside_vec:
+            return False
+    return True
+
+
 def invalid_names(expr, field_ids, operators):
     """Names in an expression that BRAIN won't recognise (catches typos before wasting a simulation)."""
     calls = {t for t in re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(", expr.lower())} - operators
@@ -196,6 +211,7 @@ def apply_repair(kind, expr, overrides, base):
 class Knowledge:
     def __init__(self, rows, submissions, cfg, checks=(), submitted_alphas=(), novelty=None):
         self.cfg = cfg
+        self.field_kind = {}  # field id -> MATRIX / VECTOR (filled from fields.csv when planning)
         self.novelty = novelty or {}
         # BRAIN takes a while to include a new submission in its correlation checks, so checks
         # made shortly after a submission can't be trusted for alphas sharing data with it.
@@ -511,8 +527,11 @@ class Knowledge:
         elif kind == "field_swap" and field and r["dataset"] in fields_by_dataset:
             # Related fields first (sharing a word with the original), then any unused field.
             words = set(field.lower().split("_")) - {"fnd6", "fn", "anl4", "a", "q", "value", "v1300"}
+            # Same kind as the field it replaces: a list field inside vec_avg(...) needs a list field.
+            kind_of = self.field_kind.get(field, "MATRIX")
             pool = [f for f in fields_by_dataset[r["dataset"]]
                     if f != field and f not in self.submitted_fields and f not in self.burned_fields
+                    and self.field_kind.get(f, "MATRIX") == kind_of
                     and self.field_passes[f] < self.cfg["max_passes_per_field"]]
             related = [f for f in pool if words & set(f.lower().split("_"))]
             random.shuffle(related)
@@ -674,8 +693,8 @@ class Knowledge:
         seen = set(done)
         fields_by_dataset = defaultdict(list)
         for field_id, dataset, kind in fields:
-            if kind == "MATRIX":
-                fields_by_dataset[dataset].append(field_id)
+            fields_by_dataset[dataset].append(field_id)
+            self.field_kind[field_id] = kind
         # Correlation repairs first: these alphas already pass every in-sample check.
         jobs = self.plan_corr_repairs(seen, budget, fields_by_dataset, focus)
         if focus is None:
