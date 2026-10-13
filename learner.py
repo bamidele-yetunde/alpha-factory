@@ -128,17 +128,26 @@ def one_sided(row):
     return longs + shorts > 0 and min(longs, shorts) < 0.1 * max(longs, shorts)
 
 
+def novelty_factor(row):
+    """1 for a bet clearly unlike your submissions (max corr < 0.5), falling to 0.2 at 0.7 and above."""
+    mc = row.get("max_corr")
+    if mc is None:
+        return 1.0
+    return max(0.2, min(1.0, 1 - (num(mc) - 0.5) * 4))
+
+
 def reward(row):
     """1 for a verified pass, 0.6 for an unverified one, 0.15 for one that failed the
-    correlation/robustness gate, otherwise up to 0.6 for how close Sharpe and fitness got."""
+    correlation/robustness gate, otherwise up to 0.6 for how close Sharpe and fitness got.
+    Anything short of a verified pass is scaled down when its bet copies a submission."""
     if row["passed"] == "True":
         return 1.0
     if row["passed"] == "Pending":
-        return 0.6
+        return 0.6 * novelty_factor(row)
     if set(row["failed_checks"].split(";")) & GATE_CHECKS:
         return 0.15
     closeness = min(abs(num(row["sharpe"])) / 1.25, abs(num(row["fitness"])) / 1.0)
-    return 0.6 * max(0.0, min(1.0, closeness))
+    return 0.6 * max(0.0, min(1.0, closeness)) * novelty_factor(row)
 
 
 def components(row):
@@ -183,8 +192,9 @@ def apply_repair(kind, expr, overrides, base):
 
 
 class Knowledge:
-    def __init__(self, rows, submissions, cfg, checks=(), submitted_alphas=()):
+    def __init__(self, rows, submissions, cfg, checks=(), submitted_alphas=(), novelty=None):
         self.cfg = cfg
+        self.novelty = novelty or {}
         # BRAIN takes a while to include a new submission in its correlation checks, so checks
         # made shortly after a submission can't be trusted for alphas sharing data with it.
         common = {"cap", "returns", "close", "volume", "open", "high", "low", "vwap"}
@@ -198,6 +208,15 @@ class Knowledge:
             if c["verdict"] != "RETRY" or self.checks.get(c["alpha_id"], {}).get("verdict") in (None, "RETRY"):
                 self.checks[c["alpha_id"]] = c
         rows = [self._apply_check(r) for r in rows]
+        # How different each alpha's bet is from your submissions (highest exact correlation), from
+        # the novelty scores or an exact check; reward() uses it so the learner favours new bets.
+        for r in rows:
+            mc = self.novelty.get(r["alpha_id"])
+            check = self.checks.get(r["alpha_id"])
+            if check and check.get("self_corr") not in (None, ""):
+                mc = num(check["self_corr"], mc)
+            if mc is not None:
+                r["max_corr"] = mc
         self.rows = rows
         self.sims = [r for r in rows if r["alpha_id"]]
         by_id = {r["alpha_id"]: r for r in self.sims}
@@ -353,18 +372,26 @@ class Knowledge:
             for dataset, ids in by_dataset.items():
                 fresh[kind][dataset] = [f for f in ids if f not in self.tried_fields and f not in banned_fields]
 
-        def pick_field(kind, exclude_dataset=None, explore=False):
+        fast = set(cfg.get("fast_datasets", []))
+
+        def pick_field(kind, exclude_dataset=None, explore=False, only=None):
+            if only is not None:
+                # Short-window shapes need data that changes daily (news, options, social, price):
+                # on quarterly fundamentals a 5-22 day change only copies the filing date.
+                keep = lambda d: d in only
+            else:
+                keep = lambda d: True
             if explore:
                 # Even spread over datasets that still have unexplored fields, then a random one of them;
                 # no dataset gets more than a quarter of the exploration ideas in one cycle.
-                datasets = [d for d, ids in fresh[kind].items() if ids and d != exclude_dataset
+                datasets = [d for d, ids in fresh[kind].items() if ids and d != exclude_dataset and keep(d)
                             and explored_in[d] < max(2, n_explore // 4)]
                 if not datasets:
                     return None, None
                 dataset = random.choice(sorted(datasets))
                 options = [f for f in fresh[kind][dataset] if per_field[f] == 0]
                 return (random.choice(options), dataset) if options else (None, None)
-            datasets = [d for d in pools[kind] if d != exclude_dataset]
+            datasets = [d for d in pools[kind] if d != exclude_dataset and keep(d)]
             if not datasets:
                 return None, None
             dataset = self.pick("dataset", allowed("dataset", sorted(datasets)))
@@ -392,9 +419,10 @@ class Knowledge:
             names = placeholders(template)
             row = {"template": template, "field": "", "dataset": "", "window": "", "group": ""}
             fill = {}
+            only = fast if "swindow" in names else None
             if "field" in names or "vfield" in names:
                 kind, slot = ("MATRIX", "field") if "field" in names else ("VECTOR", "vfield")
-                fill[slot], row["dataset"] = pick_field(kind, explore=explore)
+                fill[slot], row["dataset"] = pick_field(kind, explore=explore, only=only)
                 row["field"] = fill[slot]
                 if not row["field"]:
                     continue
@@ -410,6 +438,8 @@ class Knowledge:
                 row["window"] = fill["window"] = self.pick("window", prof["windows"])
             if "group" in names:
                 row["group"] = fill["group"] = self.pick("group", prof["groups"])
+            if "swindow" in names:
+                fill["swindow"] = self.pick("swindow", search.get("short_windows", [5, 10, 22]))
             settings = {"decay": self.pick("decay", prof["decay"]),
                         "neutralization": self.pick("neutralization", prof["neutralization"])}
             if universe:

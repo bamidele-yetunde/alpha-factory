@@ -35,8 +35,9 @@ class PnlBook:
             json.dump(raw, f, separators=(",", ":"))
         self._dirty = False
 
-    def daily(self, alpha_id):
-        """{date: daily PnL change} over the last 4 years, or None if BRAIN has no record."""
+    def daily(self, alpha_id, remember=True):
+        """{date: daily PnL change} over the last 4 years, or None if BRAIN has no record.
+        remember=False: don't keep it (novelty scores of every simulation would bloat the cache)."""
         if alpha_id in self._daily:
             return self._daily[alpha_id]
         if alpha_id in self._missing:
@@ -54,8 +55,9 @@ class PnlBook:
         start = f"{int(rows[-1]['date'][:4]) - 3}-01-01"  # e.g. 2020-01-01 .. 2023-12-29
         daily = {rows[i]["date"]: rows[i]["pnl"] - rows[i - 1]["pnl"]
                  for i in range(1, len(rows)) if rows[i]["date"] >= start}
-        self._daily[alpha_id] = daily
-        self._dirty = True
+        if remember:
+            self._daily[alpha_id] = daily
+            self._dirty = True
         return daily
 
     def corr(self, a, b):

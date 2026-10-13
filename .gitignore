@@ -16,6 +16,7 @@ sweep_state.json
 run_output.txt
 notified.json
 pnl_cache.json.gz
+novelty.json
 state.enc
 *.log
 cycle*.log

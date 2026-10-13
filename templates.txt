@@ -30,3 +30,27 @@ group_zscore(ts_mean(ts_backfill({field}, 63), 22) - ts_mean(ts_backfill({field}
 
 # Does the field move with the stock? (data that leads returns)
 group_rank(ts_corr(ts_backfill({field}, 63), returns, {window}), {group})
+
+# ---- New bet types (2026-10-13): the old shapes now only copy your submissions ----
+# Each was simulated once on BRAIN before being added. {swindow} = 5/10/22 days, only with data
+# that updates daily (config "fast_datasets").
+
+# Short horizon: change and reversal over days, not years
+group_rank(ts_delta(ts_backfill({field}, 5), {swindow}), {group})
+-group_rank(ts_av_diff(ts_backfill({field}, 5), {swindow}), {group})
+group_rank(ts_corr(ts_backfill({field}, 5), returns, {swindow}), {group})
+
+# Event-driven: the size of the latest data revision, how fresh the data is, trade right after updates
+group_rank(ts_backfill({field}, 63) - last_diff_value(ts_backfill({field}, 63), 252), {group})
+-group_rank(days_from_last_change(ts_backfill({field}, 63)), {group})
+trade_when(days_from_last_change(ts_backfill({field}, 63)) < 10, group_rank(ts_delta(ts_backfill({field}, 63), 66), {group}), days_from_last_change(ts_backfill({field}, 63)) > 66)
+
+# Timing, extremes and regime: days since the peak, only the extreme values, recent vs long-run volatility
+group_rank(ts_arg_max(ts_backfill({field}, 63), {window}), {group})
+signed_power(group_rank(ts_zscore(ts_backfill({field}, 63), {window}), {group}) - 0.5, 3)
+group_rank(ts_std_dev(ts_backfill({field}, 63), 22) / (ts_std_dev(ts_backfill({field}, 63), {window}) + 0.0001), {group})
+
+# Relative: what one field says beyond another, compared within size deciles, linked to trading volume
+group_rank(ts_regression(ts_backfill({field}, 63), ts_backfill({field2}, 63), {window}), {group})
+group_rank(ts_delta(ts_backfill({field}, 63), {window}), bucket(rank(cap), range="0.1,1,0.1"))
+group_rank(ts_corr(ts_backfill({field}, 63), volume, {window}), {group})

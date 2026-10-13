@@ -39,6 +39,11 @@
     "universe": [
       "TOP3000",
       "TOP2000"
+    ],
+    "short_windows": [
+      5,
+      10,
+      22
     ]
   },
   "fields": [],
@@ -176,5 +181,16 @@
   "basket_corr_limit": 0.65,
   "combo_ingredient_max_corr": 0.7,
   "combo_predicted_corr_max": 0.65,
-  "verify_budget_minutes": 15
+  "verify_budget_minutes": 15,
+  "fast_datasets": [
+    "news12",
+    "news18",
+    "option8",
+    "option9",
+    "socialmedia8",
+    "socialmedia12",
+    "pv1",
+    "pv13"
+  ],
+  "novelty_per_round": 25
 }

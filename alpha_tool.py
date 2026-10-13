@@ -51,6 +51,7 @@ READY = HERE / "READY_TO_SUBMIT.csv"
 IDEAS = HERE / "ideas.txt"
 NOTIFIED = HERE / "notified.json"
 OPERATORS = HERE / "operators.json"
+NOVELTY = HERE / "novelty.json"
 
 RESULT_COLUMNS = ["cycle", "expression", "settings", "template", "field", "dataset", "window", "group",
                   "repair", "parent", "depth", "alpha_id", "passed", "sharpe", "fitness", "turnover",
@@ -160,8 +161,41 @@ def report_invalid_ideas(templates):
                 log(f"IDEA SKIPPED (unknown names {sorted(bad)}): {t}")
 
 
+def load_novelty():
+    try:
+        return json.loads(NOVELTY.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def update_novelty(cfg, limit=None):
+    """Score how different each simulated alpha's bet is from your submissions: its highest exact
+    correlation with any submitted alpha (daily profits). The learner then favours the templates,
+    data and settings that make *different* bets, not just ones that pass in-sample: on 2026-10-13,
+    46 of 46 in-sample passes copied a submission, 74% of them alphas the bot itself had made.
+    Newest simulations first; `novelty_per_round` per call so it never holds up a cycle."""
+    from learner import num
+    scores = load_novelty()
+    todo = [r["alpha_id"] for r in reversed(load_csv(RESULTS))
+            if r["alpha_id"] and not r["error"] and abs(num(r["sharpe"])) >= 0.5 and r["alpha_id"] not in scores]
+    todo = list(dict.fromkeys(todo))[:limit or cfg.get("novelty_per_round", 40)]
+    if not todo:
+        return
+    book, subs = pnl_book(), [s["id"] for s in load_csv(SUBMITTED)]
+    for alpha_id in todo:
+        daily = book.daily(alpha_id, remember=False)
+        corr = book.series_max_corr(daily, subs)[0] if daily else None
+        scores[alpha_id] = round(abs(corr), 3) if corr is not None else None
+    NOVELTY.write_text(json.dumps(scores), encoding="utf-8")
+    book.save()
+    known = [v for v in scores.values() if v is not None]
+    log(f"NOVELTY: scored {len(todo)} more simulations against your submissions "
+        f"({sum(v < 0.5 for v in known)} of {len(known)} scored so far make a clearly different bet, max corr < 0.5)")
+
+
 def knowledge(cfg):
-    know = Knowledge(load_csv(RESULTS), load_csv(SUBMISSIONS), cfg, load_csv(CHECKS), load_csv(SUBMITTED))
+    know = Knowledge(load_csv(RESULTS), load_csv(SUBMISSIONS), cfg, load_csv(CHECKS), load_csv(SUBMITTED),
+                     novelty=load_novelty())
     # Exact correlations from daily profits (fetched lazily, only when a plan asks for them).
     subs = [s["id"] for s in load_csv(SUBMITTED)]
     know.corr_to_submitted = lambda alpha_id: pnl_book().max_corr(alpha_id, subs)[0]
@@ -527,6 +561,7 @@ def run_cycle(cfg, dry_run=False):
     if not dry_run:
         sync_submitted()
         verify_pending(cfg)
+        update_novelty(cfg)
     templates = load_templates()
     if not dry_run:
         report_invalid_ideas(templates)
@@ -558,6 +593,7 @@ def run_cycle(cfg, dry_run=False):
     verify_pending(cfg)
     repairs = early + repairs
 
+    update_novelty(cfg)
     know = write_reports(cfg)
     exploration_report(know, cfg)
     this = [r for r in know.sims if r["cycle"] == str(cycle)]
