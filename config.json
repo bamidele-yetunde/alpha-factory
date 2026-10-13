@@ -52,7 +52,7 @@
   "repairs_per_cycle": 50,
   "repairs_per_alpha": 3,
   "max_repair_depth": 2,
-  "repair_min_sharpe": 1.1,
+  "repair_min_sharpe": 1.0,
   "max_per_field_per_cycle": 3,
   "max_passes_per_field": 2,
   "dead_after_trials": 15,
