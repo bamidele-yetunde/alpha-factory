@@ -129,10 +129,12 @@ def one_sided(row):
 
 
 def novelty_factor(row):
-    """1 for a bet clearly unlike your submissions (max corr < 0.5), falling to 0.2 at 0.7 and above."""
+    """1 for a bet clearly unlike your submissions (max corr < 0.5), falling to 0.2 at 0.7 and above.
+    Not measured yet: 0.5. Most older ideas copy a submission, so an unmeasured one must not outrank a
+    measured new bet (on 2026-10-13 they took the whole repair budget)."""
     mc = row.get("max_corr")
     if mc is None:
-        return 1.0
+        return 0.5
     return max(0.2, min(1.0, 1 - (num(mc) - 0.5) * 4))
 
 
