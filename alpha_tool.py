@@ -591,7 +591,7 @@ def run_cycle(cfg, dry_run=False):
     if early:
         simulate_jobs(early, cfg, cycle)
     explore = [j for j in new if j["repair"] == "explore"]
-    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(explore)} on never-tried fields: "
+    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(explore)} exploring a field new to its shape: "
         f"{', '.join(sorted({j['dataset'] for j in explore})) or 'none left'})")
     if new:
         simulate_jobs(new, cfg, cycle)

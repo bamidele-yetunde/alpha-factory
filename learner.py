@@ -384,15 +384,22 @@ class Knowledge:
         saturated = {f: 0.2 for f, k in self.field_passes.items() if k >= cfg["max_passes_per_field"]}
         per_field = Counter()
         banned_fields = self.burned_fields | self.submitted_fields
-        # Never-tried fields, not burned or used in your submissions, by type and dataset.
-        fresh = defaultdict(lambda: defaultdict(list))
-        for kind, by_dataset in pools.items():
-            for dataset, ids in by_dataset.items():
-                fresh[kind][dataset] = [f for f in ids if f not in self.tried_fields and f not in banned_fields]
+        # Fields never tried WITH THIS SHAPE (not burned or used in your submissions), by type and dataset.
+        # By 2026-10-14 every ordinary field had been tried once, almost all only with the old shapes,
+        # so "never tried at all" left nothing to explore; a field is still new to each new shape.
+        tried_pairs = {(r["template"], r["field"]) for r in self.rows if r.get("field")}
+        fresh_cache = {}
+
+        def fresh_for(template, kind):
+            if (template, kind) not in fresh_cache:
+                fresh_cache[(template, kind)] = {
+                    dataset: [f for f in ids if (template, f) not in tried_pairs and f not in banned_fields]
+                    for dataset, ids in pools[kind].items()}
+            return fresh_cache[(template, kind)]
 
         fast = set(cfg.get("fast_datasets", []))
 
-        def pick_field(kind, exclude_dataset=None, explore=False, only=None):
+        def pick_field(kind, exclude_dataset=None, explore=False, only=None, template=None):
             if only is not None:
                 # Short-window shapes need data that changes daily (news, options, social, price):
                 # on quarterly fundamentals a 5-22 day change only copies the filing date.
@@ -402,12 +409,13 @@ class Knowledge:
             if explore:
                 # Even spread over datasets that still have unexplored fields, then a random one of them;
                 # no dataset gets more than a quarter of the exploration ideas in one cycle.
-                datasets = [d for d, ids in fresh[kind].items() if ids and d != exclude_dataset and keep(d)
+                fresh = fresh_for(template, kind)
+                datasets = [d for d, ids in fresh.items() if ids and d != exclude_dataset and keep(d)
                             and explored_in[d] < max(2, n_explore // 4)]
                 if not datasets:
                     return None, None
                 dataset = random.choice(sorted(datasets))
-                options = [f for f in fresh[kind][dataset] if per_field[f] == 0]
+                options = [f for f in fresh[dataset] if per_field[f] == 0]
                 return (random.choice(options), dataset) if options else (None, None)
             datasets = [d for d in pools[kind] if d != exclude_dataset and keep(d)]
             if not datasets:
@@ -440,13 +448,14 @@ class Knowledge:
             only = fast if "swindow" in names else None
             if "field" in names or "vfield" in names:
                 kind, slot = ("MATRIX", "field") if "field" in names else ("VECTOR", "vfield")
-                fill[slot], row["dataset"] = pick_field(kind, explore=explore, only=only)
+                fill[slot], row["dataset"] = pick_field(kind, explore=explore, only=only, template=template)
                 row["field"] = fill[slot]
                 if not row["field"]:
                     continue
             if "field2" in names:
                 # Second signal from a different dataset: combinations rarely match anything submitted.
-                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"], explore=explore)
+                # The second field only needs to be new to the shape when it is the exploration slot too.
+                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"], explore=False)
                 if not fill["field2"]:
                     continue
             # Universe first: smaller universes get their own groups, neutralisation, decay and truncation.

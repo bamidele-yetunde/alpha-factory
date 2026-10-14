@@ -54,3 +54,9 @@ group_rank(ts_std_dev(ts_backfill({field}, 63), 22) / (ts_std_dev(ts_backfill({f
 group_rank(ts_regression(ts_backfill({field}, 63), ts_backfill({field2}, 63), {window}), {group})
 group_rank(ts_delta(ts_backfill({field}, 63), {window}), bucket(rank(cap), range="0.1,1,0.1"))
 group_rank(ts_corr(ts_backfill({field}, 63), volume, {window}), {group})
+
+# List-field (VECTOR) versions of the new shapes (2026-10-14): 885 list fields were untried and the
+# only two list shapes match ones you have submitted. Each was simulated once on BRAIN first.
+group_rank(vec_avg({vfield}) - last_diff_value(vec_avg({vfield}), 252), {group})
+-group_rank(days_from_last_change(vec_avg({vfield})), {group})
+group_rank(ts_std_dev(vec_avg({vfield}), 22) / (ts_std_dev(vec_avg({vfield}), {window}) + 0.0001), {group})
