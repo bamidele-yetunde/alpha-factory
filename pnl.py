@@ -6,6 +6,7 @@ The cache (pnl_cache.json.gz) only grows: an alpha's in-sample PnL never changes
 """
 import gzip
 import json
+import os
 import statistics
 from pathlib import Path
 
@@ -24,15 +25,23 @@ class PnlBook:
             with gzip.open(CACHE, "rt", encoding="utf-8") as f:
                 raw = json.load(f)
             self._daily = {a: dict(zip(v["d"], v["p"])) for a, v in raw.items()}
-        except (OSError, ValueError, KeyError):
+        except FileNotFoundError:
             pass
+        except Exception:
+            # A damaged cache (e.g. cut off mid-write) is only a cache: start empty and re-download.
+            # On 2026-10-15 a truncated file (EOFError) crashed every work chunk for 3 hours.
+            self._daily = {}
+            self._dirty = True
 
     def save(self):
+        """Write to a temporary file, then swap it in, so the cache is never left half-written."""
         if not self._dirty:
             return
         raw = {a: {"d": list(v), "p": list(v.values())} for a, v in self._daily.items()}
-        with gzip.open(CACHE, "wt", encoding="utf-8") as f:
+        tmp = CACHE.with_name(CACHE.name + ".tmp")
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
             json.dump(raw, f, separators=(",", ":"))
+        os.replace(tmp, CACHE)
         self._dirty = False
 
     def daily(self, alpha_id, remember=True):

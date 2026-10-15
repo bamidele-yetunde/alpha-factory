@@ -73,19 +73,38 @@ jobs:
             rm -rf "$tmp"
           }
           alert() { python -c "import sys; from notify import telegram; telegram(sys.argv[1])" "$1" || true; }
+          # At most one problem alert per hour: on 2026-10-15 a crash loop sent ~1,150 alerts in 3 hours.
+          last_alert=-999999
+          alert_limited() {
+            if [ $((SECONDS - last_alert)) -ge 3600 ]; then alert "$1"; last_alert=$SECONDS; fi
+          }
+          fast_fails=0
           # 270 min of work + one chunk of at most 70 min + saves stays under the 350-min job limit.
           end=$((SECONDS + 270*60))
           while [ $SECONDS -lt $end ]; do
             # Hard cap per chunk: even if something hangs, progress is still saved and the loop goes on.
             rc=0  # (steps run under bash -e: capture the exit code instead of letting it end the loop)
+            started=$SECONDS
+            # Keep only the last ~200 KB of error output (it is saved with the state).
+            if [ -f run_output.txt ]; then tail -c 200000 run_output.txt > run_output.tmp && mv run_output.tmp run_output.txt; fi
             timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || rc=$?
             if [ $rc -eq 124 ]; then
-              alert "⚠️ Alpha bot: a work chunk hit its 70-min limit (something on BRAIN hung). Progress saved; carrying on."
+              alert_limited "⚠️ Alpha bot: a work chunk hit its 70-min limit (something on BRAIN hung). Progress saved; carrying on."
             elif [ $rc -ne 0 ]; then
-              alert "⚠️ Alpha bot: a work chunk crashed (exit $rc). Progress saved; carrying on."
+              alert_limited "⚠️ Alpha bot: a work chunk crashed (exit $rc). Progress saved; carrying on. (At most one alert per hour.)"
             fi
-            save || alert "⚠️ Alpha bot: saving progress to GitHub failed; will try again after the next chunk."
+            save || alert_limited "⚠️ Alpha bot: saving progress to GitHub failed; will try again after the next chunk."
             echo "chunk exit $rc, saved at $(date -u +%H:%M) UTC"
+            # A chunk that fails within 2 minutes will most likely fail again: wait instead of spinning.
+            if [ $rc -ne 0 ] && [ $((SECONDS - started)) -lt 120 ]; then
+              fast_fails=$((fast_fails + 1))
+              if [ $fast_fails -eq 3 ]; then
+                alert "🛑 Alpha bot: crashing straight away 3 times in a row. Retrying every 15 min; please ask for a check."
+              fi
+              sleep 900
+            else
+              fast_fails=0
+            fi
           done
 
       - name: Final save

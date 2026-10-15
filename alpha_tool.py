@@ -96,6 +96,14 @@ def pnl_book():
     return _book
 
 
+def write_atomic(path, text):
+    """Write via a temporary file and swap it in: a run stopped mid-write never leaves a cut-off file
+    (a truncated pnl_cache.json.gz crashed every work chunk for 3 hours on 2026-10-15)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def load_config():
     return json.loads(CONFIG.read_text(encoding="utf-8"))
 
@@ -186,7 +194,7 @@ def update_novelty(cfg, limit=None):
         daily = book.daily(alpha_id, remember=False)
         corr = book.series_max_corr(daily, subs)[0] if daily else None
         scores[alpha_id] = round(abs(corr), 3) if corr is not None else None
-    NOVELTY.write_text(json.dumps(scores), encoding="utf-8")
+    write_atomic(NOVELTY, json.dumps(scores))
     book.save()
     known = [v for v in scores.values() if v is not None]
     log(f"NOVELTY: scored {len(todo)} more simulations against your submissions "
@@ -625,7 +633,7 @@ def load_sweep_state():
 
 
 def save_sweep_state(state):
-    SWEEP_STATE.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    write_atomic(SWEEP_STATE, json.dumps(state, indent=1))
 
 
 def sweep_family(know, seed_id):
@@ -765,7 +773,7 @@ def load_notified():
 
 
 def save_notified(state):
-    NOTIFIED.write_text(json.dumps(state), encoding="utf-8")
+    write_atomic(NOTIFIED, json.dumps(state))
 
 
 def discover_datasets(cfg):
@@ -870,7 +878,7 @@ def heartbeat(cfg):
               f"Total submitted from the tool: {len(submitted)}"]
     if telegram("\n".join(lines)):
         state.update(heartbeat_at=now.isoformat(timespec="seconds"), sims=len(know.sims), verified=len(verified))
-        NOTIFIED.write_text(json.dumps(state), encoding="utf-8")
+        write_atomic(NOTIFIED, json.dumps(state))
         log("HEARTBEAT sent")
 
 
