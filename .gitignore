@@ -17,6 +17,7 @@ run_output.txt
 notified.json
 pnl_cache.json.gz
 novelty.json
+brain_session.json
 state.enc
 *.log
 cycle*.log

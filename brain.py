@@ -21,6 +21,14 @@ class BrainBusy(BrainError):
     """BRAIN was overloaded or unreachable; the request itself may be fine to retry later."""
 
 
+class BrainLoginBlocked(BrainError):
+    """BRAIN refuses to log in until a person completes a check on the website (captcha or biometric
+    verification, or BIOMETRICS_THROTTLED after too many attempts). Retrying only prolongs it."""
+
+
+SESSION = HERE / "brain_session.json"
+
+
 class BrainStuck(BrainError):
     """A simulation BRAIN never finished (it kept saying "retry later"). Recorded as an error so the
     same simulation isn't retried every cycle: on 2026-10-07 one froze a whole run for 2+ hours."""
@@ -53,12 +61,45 @@ class Brain:
     def __init__(self):
         self.s = requests.Session()
         self._login_lock = threading.Lock()
-        self.login()
+        if not self._resume_session():
+            self.login()
+
+    def _resume_session(self):
+        """Reuse the saved session instead of logging in again. Logging in every 40-minute chunk, each
+        from a different GitHub server, is the likely reason BRAIN started demanding biometric checks
+        and then throttled the account (2026-10-17)."""
+        try:
+            cookies = json.loads(SESSION.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        self.s.cookies.update(cookies)
+        try:
+            r = self.s.get(f"{API}/authentication", timeout=60)
+        except requests.RequestException:
+            return False
+        if r.status_code != 200:
+            self.s.cookies.clear()
+            return False
+        try:
+            expiry = float((r.json().get("token") or {}).get("expiry", 3600))
+        except ValueError:
+            expiry = 3600
+        return expiry > 600  # at least 10 minutes left, otherwise log in afresh
+
+    def _save_session(self):
+        try:
+            tmp = SESSION.with_name(SESSION.name + ".tmp")
+            tmp.write_text(json.dumps(requests.utils.dict_from_cookiejar(self.s.cookies)), encoding="utf-8")
+            os.replace(tmp, SESSION)
+        except OSError:
+            pass
 
     def login(self):
         with self._login_lock:
             self.s.auth = load_credentials()
             r = self.s.post(f"{API}/authentication", timeout=60)
+            if r.status_code in (400, 429) and any(k in r.text for k in ("captcha", "BIOMETRICS")):
+                raise BrainLoginBlocked(f"Login blocked by BRAIN ({r.status_code}): {r.text[:200]}")
             if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":
                 url = urljoin(r.url, r.headers["Location"])
                 if sys.stdin and sys.stdin.isatty():
@@ -77,6 +118,7 @@ class Brain:
                             break
             if r.status_code not in (200, 201):
                 raise BrainError(f"Login failed ({r.status_code}): {r.text[:300]}")
+            self._save_session()
 
     def request(self, method, path, **kwargs):
         """HTTP call that re-logs in on 401 and backs off on rate limits / server errors."""

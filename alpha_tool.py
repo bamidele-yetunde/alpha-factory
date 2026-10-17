@@ -413,7 +413,7 @@ def verify_and_record(alpha_ids, cfg, sync_each=False, deadline=None, local_only
     sync_each: refresh your submissions and the ready list after every check, so a submission
     shows up within one check (about a minute) even when BRAIN is slow.
     """
-    from brain import BrainBusy, BrainError
+    from brain import BrainBusy, BrainError, BrainLoginBlocked
     results = {}
     import time
     for i, alpha_id in enumerate(alpha_ids, 1):
@@ -426,6 +426,8 @@ def verify_and_record(alpha_ids, cfg, sync_each=False, deadline=None, local_only
             write_reports(cfg)
         try:
             row = verify(alpha_id, cfg, brain_allowed=alpha_id not in local_only)
+        except BrainLoginBlocked:
+            raise  # nothing can be checked until you complete BRAIN's check; stop this chunk
         except BrainBusy:
             row = None  # BRAIN took too long: treat like an errored check and retry later
         except BrainError as e:
@@ -518,7 +520,7 @@ def summarize(alpha):
 
 def simulate_jobs(jobs, cfg, cycle):
     """Simulate jobs concurrently, appending each result to results.csv as soon as it finishes."""
-    from brain import BrainBusy, BrainError
+    from brain import BrainBusy, BrainError, BrainLoginBlocked
     from learner import type_ok
     # Last safety net, whatever made the idea: BRAIN rejects list fields outside vec_*(...) and vice versa.
     kinds = {r["id"]: r["type"] for r in load_csv(FIELDS)}
@@ -536,6 +538,8 @@ def simulate_jobs(jobs, cfg, cycle):
         row = {**job, "cycle": cycle, "settings": json.dumps(job["settings"], sort_keys=True)}
         try:
             row.update(summarize(client.simulate(job["expression"], {**cfg["settings"], **job["settings"]})))
+        except BrainLoginBlocked:
+            raise  # not the alpha's fault and nothing else can run: stop the chunk, record nothing
         except BrainBusy as e:
             # Not the alpha's fault: don't record it, so it is retried and not learned from.
             row["error"] = "BRAIN busy, will retry next cycle: " + str(e)[:200]
@@ -892,7 +896,7 @@ def safe_heartbeat(cfg):
 
 def watch_once(cfg):
     """Sync your submissions, re-check the ready list, then alphas waiting for a check."""
-    from brain import BrainError
+    from brain import BrainError, BrainLoginBlocked
     safe_heartbeat(cfg)
     try:
         sync_submitted()
@@ -921,14 +925,34 @@ def cmd_run_for(args):
     (a cycle that has started is always finished, so allow some extra time)."""
     import time
     end = time.time() + args.minutes * 60
+    from brain import BrainLoginBlocked
     log(f"RUN: GitHub run started ({args.minutes} min)")
-    discover_datasets(load_config())
-    watch_once(load_config())
-    while time.time() < end:
-        cfg = load_config()
-        (run_sweep_cycle if cfg.get("mode") == "sweep" else run_cycle)(cfg)
-        watch_once(cfg)
+    try:
+        brain()  # log in (or reuse the saved session) first: if BRAIN blocks it, stop cleanly
+        discover_datasets(load_config())
+        watch_once(load_config())
+        while time.time() < end:
+            cfg = load_config()
+            (run_sweep_cycle if cfg.get("mode") == "sweep" else run_cycle)(cfg)
+            watch_once(cfg)
+    except BrainLoginBlocked as e:
+        login_blocked(e)
+        sys.exit(75)  # the workflow waits an hour before trying again
     log("RUN: GitHub run finished; state saved")
+
+
+def login_blocked(error):
+    """Log it, and tell you on Telegram at most every 6 hours: only a person can clear it."""
+    from notify import esc, telegram
+    log(f"LOGIN BLOCKED by BRAIN: {str(error)[:150]} - waiting an hour before trying again")
+    state = load_notified()
+    last = state.get("login_blocked_alert_at")
+    if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() > 6 * 3600:
+        if telegram("🔐 BRAIN is blocking the bot's login (it wants a captcha or identity check: "
+                    f"{esc(str(error)[:80])}).\nPlease log in at https://platform.worldquantbrain.com and "
+                    "complete any check it asks for. The bot retries every hour by itself."):
+            state["login_blocked_alert_at"] = datetime.now().isoformat(timespec="seconds")
+            save_notified(state)
 
 
 def cmd_insights(args):

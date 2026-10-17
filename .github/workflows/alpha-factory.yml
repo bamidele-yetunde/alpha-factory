@@ -88,7 +88,14 @@ jobs:
             # Keep only the last ~200 KB of error output (it is saved with the state).
             if [ -f run_output.txt ]; then tail -c 200000 run_output.txt > run_output.tmp && mv run_output.tmp run_output.txt; fi
             timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || rc=$?
-            if [ $rc -eq 124 ]; then
+            if [ $rc -eq 75 ]; then
+              # BRAIN is blocking the login (captcha / identity check); the bot has told you on Telegram.
+              # Retrying often only prolongs the block, so wait an hour.
+              save || true
+              echo "login blocked by BRAIN; waiting 60 min"
+              sleep 3600
+              continue
+            elif [ $rc -eq 124 ]; then
               alert_limited "⚠️ Alpha bot: a work chunk hit its 70-min limit (something on BRAIN hung). Progress saved; carrying on."
             elif [ $rc -ne 0 ]; then
               alert_limited "⚠️ Alpha bot: a work chunk crashed (exit $rc). Progress saved; carrying on. (At most one alert per hour.)"
