@@ -27,6 +27,8 @@ class BrainLoginBlocked(BrainError):
 
 
 SESSION = HERE / "brain_session.json"
+PERSONA = HERE / "brain_face_id.json"   # the face ID check waiting for you, if any
+PERSONA_GAP_HOURS = 6                     # never open a new face ID check more often than this
 
 
 class BrainStuck(BrainError):
@@ -94,8 +96,53 @@ class Brain:
         except OSError:
             pass
 
+    def _pending_face_id(self):
+        """The identity check (face ID) still waiting for you, if one was opened less than
+        `PERSONA_GAP_HOURS` ago: {"url", "cookies", "opened_at"} or None."""
+        try:
+            p = json.loads(PERSONA.read_text(encoding="utf-8"))
+            if time.time() - p["opened_at"] < PERSONA_GAP_HOURS * 3600:
+                return p
+        except (OSError, ValueError, KeyError):
+            pass
+        return None
+
+    def _finish_login(self, how):
+        """Save the session and report how long BRAIN will honour it (it decides how often you need
+        face ID: a new login from GitHub's changing servers asks for it)."""
+        self._save_session()
+        PERSONA.unlink(missing_ok=True)
+        hours = None
+        try:
+            r = self.s.get(f"{API}/authentication", timeout=60)
+            hours = round(float((r.json().get("token") or {}).get("expiry")) / 3600, 1)
+        except (requests.RequestException, ValueError, TypeError):
+            pass
+        self.session_hours = hours
+        from notify import telegram
+        telegram(f"✅ Logged in to BRAIN ({how}). Session valid for about {hours if hours is not None else '?'} h; "
+                 "no face ID needed until it runs out.")
+
     def login(self):
         with self._login_lock:
+            from notify import esc, telegram
+            # A face ID check you haven't finished yet: only look whether it is done now. Opening a new
+            # check on every attempt is what got the account throttled (BIOMETRICS_THROTTLED, 2026-10-17).
+            pending = self._pending_face_id()
+            if pending:
+                self.s.cookies.update(pending["cookies"])
+                self.s.auth = load_credentials()
+                try:
+                    r = self.s.post(pending["url"], timeout=60)
+                except requests.RequestException as e:
+                    raise BrainLoginBlocked(f"face ID check pending; BRAIN unreachable: {e}") from e
+                if r.status_code in (200, 201):
+                    self._finish_login("face ID done")
+                    return
+                raise BrainLoginBlocked(
+                    f"waiting for you to complete the face ID check sent on Telegram "
+                    f"{(time.time() - pending['opened_at']) / 3600:.1f} h ago")
+
             self.s.auth = load_credentials()
             r = self.s.post(f"{API}/authentication", timeout=60)
             if r.status_code in (400, 429) and any(k in r.text for k in ("captcha", "BIOMETRICS")):
@@ -103,22 +150,36 @@ class Brain:
             if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":
                 url = urljoin(r.url, r.headers["Location"])
                 if sys.stdin and sys.stdin.isatty():
-                    input(f"BRAIN asks for a biometric check. Open this link, finish it, then press Enter:\n{url}\n")
+                    input(f"BRAIN asks for a face ID check. Open this link, finish it, then press Enter:\n{url}\n")
                     r = self.s.post(url, timeout=60)
                 else:
-                    # Unattended (GitHub Actions): send the link by Telegram and wait for it to be completed.
-                    from notify import esc, telegram
-                    telegram(f"\U0001F510 BRAIN wants an identity check before the alpha tool can log in.\n"
-                             f"Open this link and complete it within 20 minutes:\n{esc(url)}")
+                    # Unattended: remember this check (so no new one is opened for PERSONA_GAP_HOURS),
+                    # send the link once, and wait up to 20 minutes for you to complete it.
+                    tmp = PERSONA.with_name(PERSONA.name + ".tmp")
+                    tmp.write_text(json.dumps({"url": url, "opened_at": time.time(),
+                                               "cookies": requests.utils.dict_from_cookiejar(self.s.cookies)}),
+                                   encoding="utf-8")
+                    os.replace(tmp, PERSONA)
+                    telegram(f"\U0001F510 BRAIN wants your face ID before the bot can log in.\n"
+                             f"Open this link and complete it (best within 20 minutes):\n{esc(url)}\n"
+                             f"The bot won't ask again for {PERSONA_GAP_HOURS} h; it checks every hour "
+                             "whether you've done it.")
                     for _ in range(40):
                         time.sleep(30)
-                        r = self.s.post(url, timeout=60)
+                        try:
+                            r = self.s.post(url, timeout=60)
+                        except requests.RequestException:
+                            continue
                         if r.status_code in (200, 201):
-                            telegram("✅ Identity check done - the alpha tool is running.")
                             break
+                    if r.status_code not in (200, 201):
+                        raise BrainLoginBlocked("face ID check not completed yet (link sent on Telegram)")
+                if r.status_code in (200, 201):
+                    self._finish_login("face ID done")
+                    return
             if r.status_code not in (200, 201):
                 raise BrainError(f"Login failed ({r.status_code}): {r.text[:300]}")
-            self._save_session()
+            self._finish_login("no face ID needed")
 
     def request(self, method, path, **kwargs):
         """HTTP call that re-logs in on 401 and backs off on rate limits / server errors."""

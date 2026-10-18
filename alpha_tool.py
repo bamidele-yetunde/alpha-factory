@@ -929,6 +929,8 @@ def cmd_run_for(args):
     log(f"RUN: GitHub run started ({args.minutes} min)")
     try:
         brain()  # log in (or reuse the saved session) first: if BRAIN blocks it, stop cleanly
+        if getattr(_brain, "session_hours", None) is not None:
+            log(f"LOGIN: new BRAIN session, valid for about {_brain.session_hours} h")
         discover_datasets(load_config())
         watch_once(load_config())
         while time.time() < end:
@@ -945,6 +947,8 @@ def login_blocked(error):
     """Log it, and tell you on Telegram at most every 6 hours: only a person can clear it."""
     from notify import esc, telegram
     log(f"LOGIN BLOCKED by BRAIN: {str(error)[:150]} - waiting an hour before trying again")
+    if "face ID" in str(error):
+        return  # the face ID link itself was already sent on Telegram; don't add a second message
     state = load_notified()
     last = state.get("login_blocked_alert_at")
     if not last or (datetime.now() - datetime.fromisoformat(last)).total_seconds() > 6 * 3600:

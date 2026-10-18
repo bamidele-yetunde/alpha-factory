@@ -18,6 +18,7 @@ notified.json
 pnl_cache.json.gz
 novelty.json
 brain_session.json
+brain_face_id.json
 state.enc
 *.log
 cycle*.log
