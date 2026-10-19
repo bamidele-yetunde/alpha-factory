@@ -462,6 +462,17 @@ def write_reports(cfg):
     before = {r["alpha_id"] for r in load_csv(READY)}
     supers = super_candidates()
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
+    # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
+    # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
+    today = brain_today()
+    used = sum(1 for s in load_csv(SUBMITTED)
+               if s.get("type", "REGULAR") != "SUPER" and (s.get("submitted_at") or "")[:10] == today)
+    room = max(0, cfg.get("alpha_daily_quota", 4) - used)
+    regular = [r for r in ready if not r.get("super")]
+    if len(regular) > room:
+        held = {r["alpha_id"] for r in regular[room:]}
+        ready = [r for r in ready if r["alpha_id"] not in held]
+        backups.update({a: (0.0, "today's quota of 4 alphas") for a in held})
     super_ids = {r["alpha_id"] for r in supers}
     if failing.keys() & super_ids:
         import superalpha as SA
@@ -504,7 +515,8 @@ def write_reports(cfg):
             reason = f"now too similar to your submission {w} ({c:.2f})"
         elif alpha_id in backups:
             c, w = backups[alpha_id]
-            reason = f"replaced by {w}, a stronger alpha making the same bet ({c:.2f}); kept as a backup"
+            reason = (f"held for tomorrow: {w} is used up" if w.startswith("today's quota") else
+                      f"replaced by {w}, a stronger alpha making the same bet ({c:.2f}); kept as a backup")
         elif (know.checks.get(alpha_id, {}).get("verdict") == "PASS"
               and know.checks[alpha_id].get("checked_at", "") < cfg.get("rules_since", "")):
             reason = "it was checked under the old (pre-consultant) rules; re-checking it under the consultant rules"

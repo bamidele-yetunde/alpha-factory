@@ -287,5 +287,6 @@
       "maxTrade": "ON"
     }
   },
-  "dataset_batch": 60
+  "dataset_batch": 60,
+  "alpha_daily_quota": 4
 }
