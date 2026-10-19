@@ -935,11 +935,15 @@ def cmd_run_for(args):
         watch_once(load_config())
         while time.time() < end:
             cfg = load_config()
+            # Ask for a face ID renewal shortly before the 4-hour BRAIN session runs out (never blocks).
+            brain().renew_if_needed()
             (run_sweep_cycle if cfg.get("mode") == "sweep" else run_cycle)(cfg)
             watch_once(cfg)
     except BrainLoginBlocked as e:
         login_blocked(e)
-        sys.exit(75)  # the workflow waits an hour before trying again
+        # 76: only waiting for your face ID (the login already waited 50 min): look again straight away.
+        # 75: captcha / throttled: every attempt counts as a sign-in, so the workflow waits an hour.
+        sys.exit(76 if "face ID" in str(e) else 75)
     log("RUN: GitHub run finished; state saved")
 
 

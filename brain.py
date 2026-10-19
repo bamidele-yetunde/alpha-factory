@@ -86,7 +86,71 @@ class Brain:
             expiry = float((r.json().get("token") or {}).get("expiry", 3600))
         except ValueError:
             expiry = 3600
+        self.expires_at = time.time() + expiry
         return expiry > 600  # at least 10 minutes left, otherwise log in afresh
+
+    # ---------- renewing before the 4-hour session runs out (face ID is required for every login) ----------
+
+    def renew_if_needed(self, minutes_before=25):
+        """Called between cycles. When the session ends within `minutes_before`, open ONE face ID check in
+        a separate connection and send you the link, so you can renew before the bot stops. Also completes a
+        renewal you have just finished. Never blocks."""
+        if getattr(self, "_renewal", None):
+            self._poll_renewal()
+            return
+        left = getattr(self, "expires_at", 0) - time.time()
+        if left > minutes_before * 60 or self._pending_face_id():
+            return
+        from notify import esc, telegram
+        s = requests.Session()
+        s.auth = load_credentials()
+        try:
+            r = s.post(f"{API}/authentication", timeout=60)
+        except requests.RequestException:
+            return
+        if r.status_code in (200, 201):  # BRAIN didn't ask for face ID this time
+            self.s.cookies.update(s.cookies)
+            self._finish_login("renewed, no face ID needed")
+            return
+        if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":
+            url = urljoin(r.url, r.headers["Location"])
+            self._remember_face_id(url, s)
+            self._renewal = (s, url)
+            ends = time.strftime("%H:%M", time.localtime(getattr(self, "expires_at", time.time())))
+            telegram(f"\U0001F510 The bot's BRAIN session ends at {ends}. Renew it now with your face ID so the "
+                     f"bot keeps working without a gap:\n{esc(url)}")
+
+    def _poll_renewal(self):
+        s, url = self._renewal
+        try:
+            r = s.post(url, timeout=60)
+        except requests.RequestException:
+            return
+        if r.status_code in (200, 201):
+            self.s.cookies.update(s.cookies)
+            self._renewal = None
+            self._finish_login("renewed with face ID")
+
+    def _wait_for_face_id(self, url, minutes):
+        """True as soon as BRAIN confirms the face ID check (asked every 3 minutes for `minutes`)."""
+        deadline = time.time() + minutes * 60
+        while True:
+            try:
+                r = self.s.post(url, timeout=60)
+                if r.status_code in (200, 201):
+                    return True
+            except requests.RequestException:
+                pass
+            if time.time() + 180 > deadline:
+                return False
+            time.sleep(180)
+
+    def _remember_face_id(self, url, session):
+        tmp = PERSONA.with_name(PERSONA.name + ".tmp")
+        tmp.write_text(json.dumps({"url": url, "opened_at": time.time(),
+                                   "cookies": requests.utils.dict_from_cookiejar(session.cookies)}),
+                       encoding="utf-8")
+        os.replace(tmp, PERSONA)
 
     def _save_session(self):
         try:
@@ -119,6 +183,7 @@ class Brain:
         except (requests.RequestException, ValueError, TypeError):
             pass
         self.session_hours = hours
+        self.expires_at = time.time() + (hours or 4) * 3600
         from notify import telegram
         telegram(f"✅ Logged in to BRAIN ({how}). Session valid for about {hours if hours is not None else '?'} h; "
                  "no face ID needed until it runs out.")
@@ -132,11 +197,8 @@ class Brain:
             if pending:
                 self.s.cookies.update(pending["cookies"])
                 self.s.auth = load_credentials()
-                try:
-                    r = self.s.post(pending["url"], timeout=60)
-                except requests.RequestException as e:
-                    raise BrainLoginBlocked(f"face ID check pending; BRAIN unreachable: {e}") from e
-                if r.status_code in (200, 201):
+                # Look every 3 minutes for up to 50 minutes, so the bot starts soon after you finish.
+                if self._wait_for_face_id(pending["url"], minutes=50):
                     self._finish_login("face ID done")
                     return
                 raise BrainLoginBlocked(
@@ -154,26 +216,16 @@ class Brain:
                     r = self.s.post(url, timeout=60)
                 else:
                     # Unattended: remember this check (so no new one is opened for PERSONA_GAP_HOURS),
-                    # send the link once, and wait up to 20 minutes for you to complete it.
-                    tmp = PERSONA.with_name(PERSONA.name + ".tmp")
-                    tmp.write_text(json.dumps({"url": url, "opened_at": time.time(),
-                                               "cookies": requests.utils.dict_from_cookiejar(self.s.cookies)}),
-                                   encoding="utf-8")
-                    os.replace(tmp, PERSONA)
+                    # send the link once, and look every 3 minutes for up to 50 minutes.
+                    self._remember_face_id(url, self.s)
                     telegram(f"\U0001F510 BRAIN wants your face ID before the bot can log in.\n"
-                             f"Open this link and complete it (best within 20 minutes):\n{esc(url)}\n"
-                             f"The bot won't ask again for {PERSONA_GAP_HOURS} h; it checks every hour "
-                             "whether you've done it.")
-                    for _ in range(40):
-                        time.sleep(30)
-                        try:
-                            r = self.s.post(url, timeout=60)
-                        except requests.RequestException:
-                            continue
-                        if r.status_code in (200, 201):
-                            break
-                    if r.status_code not in (200, 201):
+                             f"Open this link and complete it:\n{esc(url)}\n"
+                             f"The bot looks every few minutes and starts as soon as you're done; it won't "
+                             f"send a new link for {PERSONA_GAP_HOURS} h.")
+                    if not self._wait_for_face_id(url, minutes=50):
                         raise BrainLoginBlocked("face ID check not completed yet (link sent on Telegram)")
+                    self._finish_login("face ID done")
+                    return
                 if r.status_code in (200, 201):
                     self._finish_login("face ID done")
                     return

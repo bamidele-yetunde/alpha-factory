@@ -88,7 +88,13 @@ jobs:
             # Keep only the last ~200 KB of error output (it is saved with the state).
             if [ -f run_output.txt ]; then tail -c 200000 run_output.txt > run_output.tmp && mv run_output.tmp run_output.txt; fi
             timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || rc=$?
-            if [ $rc -eq 75 ]; then
+            if [ $rc -eq 76 ]; then
+              # Still waiting for your face ID (the bot already looked every 3 min for 50 min): carry on looking.
+              save || true
+              echo "waiting for face ID"
+              sleep 30
+              continue
+            elif [ $rc -eq 75 ]; then
               # BRAIN is blocking the login (captcha / identity check); the bot has told you on Telegram.
               # Retrying often only prolongs the block, so wait an hour.
               save || true
