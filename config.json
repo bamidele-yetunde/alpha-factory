@@ -34,7 +34,10 @@
     "neutralization": [
       "SUBINDUSTRY",
       "INDUSTRY",
-      "MARKET"
+      "MARKET",
+      "STATISTICAL",
+      "SLOW_AND_FAST",
+      "CROWDING"
     ],
     "universe": [
       "TOP3000",

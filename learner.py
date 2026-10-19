@@ -34,7 +34,12 @@ GROUPS = {"market", "sector", "industry", "subindustry"}
 REPAIRS = {
     "HIGH_TURNOVER": ["decay_up5", "decay_up15", "smooth", "decay_linear"],
     "LOW_FITNESS": ["decay_up5", "smooth", "neut_subindustry", "decay_up15", "neut_industry", "neut_market"],
-    "LOW_SHARPE": ["neut_subindustry", "neut_industry", "neut_sector", "neut_market", "neut_none", "smooth"],
+    # Consultant risk neutralisations (2026-10-19) are tried after the usual ones: on 3 near-misses STATISTICAL
+    # lowered Sharpe (1.54 -> 1.09, 1.48 -> 1.18), so they only move up if the learned repair stats favour them.
+    "LOW_SHARPE": ["neut_subindustry", "neut_industry", "neut_sector", "neut_market", "smooth",
+                   "neut_slow_and_fast", "neut_crowding", "neut_statistical"],
+    "LOW_2Y_SHARPE": ["decay_down", "neut_subindustry", "neut_slow_and_fast", "neut_crowding"],
+    "IS_LADDER_SHARPE": ["decay_down", "neut_subindustry", "neut_slow_and_fast", "neut_crowding"],
     "LOW_TURNOVER": ["decay_down"],
     "CONCENTRATED_WEIGHT": ["decay_up5", "decay_up15", "trunc_05", "rank"],  # decay spreads holdings over more stocks
     "LOW_SUB_UNIVERSE_SHARPE": ["neut_subindustry", "neut_industry", "rank"],
@@ -42,8 +47,9 @@ REPAIRS = {
 
 # Fixes for alphas that pass everything except self-correlation (or robustness): change what the
 # alpha holds so its P&L stops tracking your submitted alphas. Learned success rates re-rank them.
-CORR_REPAIRS = ["subtract_corr", "neut_none", "neut_market", "neut_sector", "neut_industry",
-                "neut_subindustry", "field_swap", "group_swap", "universe_swap", "size_neutral"]
+CORR_REPAIRS = ["subtract_corr", "neut_none", "neut_market", "neut_sector", "neut_industry", "neut_subindustry",
+                "field_swap", "group_swap", "universe_swap", "size_neutral", "neut_crowding", "neut_slow_and_fast",
+                "neut_statistical"]
 NEUTRALIZATIONS = ["NONE", "MARKET", "SECTOR", "INDUSTRY", "SUBINDUSTRY"]
 UNIVERSES = ["TOP3000", "TOP2000", "TOP1000", "TOP500"]
 
