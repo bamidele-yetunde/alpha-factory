@@ -211,5 +211,9 @@
       30
     ]
   },
-  "sim_reserve": 100
+  "sim_reserve": 100,
+  "rules_since": "2026-10-18T00:00:00",
+  "super_daily_quota": 1,
+  "consultant_min_sharpe": 1.58,
+  "resim_per_cycle": 10
 }

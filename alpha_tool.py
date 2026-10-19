@@ -60,7 +60,7 @@ RESULT_COLUMNS = ["cycle", "expression", "settings", "template", "field", "datas
 SUBMISSION_COLUMNS = ["alpha_id", "field", "status", "failed_checks"]
 FIELD_COLUMNS = ["id", "dataset", "type", "coverage", "alpha_count", "description"]
 CHECK_COLUMNS = ["alpha_id", "checked_at", "verdict", "failed", "self_corr", "corr_with", "yearly_sharpe", "detail"]
-SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at", "sharpe"]
+SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at", "sharpe", "type"]
 
 ACTIVITY_LOG = HERE / "activity_log.txt"
 
@@ -380,10 +380,56 @@ def check_super(row, cfg):
     _update_super(row)
 
 
-def super_candidates():
-    """Verified SuperAlphas not yet submitted, in the same shape as regular shortlist rows."""
-    import superalpha as SA
+def brain_today():
+    """Today's date on BRAIN's clock (US Eastern), which decides daily quotas and limits."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        from datetime import timedelta, timezone
+        return datetime.now(timezone(timedelta(hours=-4))).date().isoformat()
+
+
+def resimulate_old(cfg, cycle):
+    """Alphas BRAIN now rejects only because they were simulated under the old rules (OLD_SIMULATION) are
+    simulated again when their Sharpe could still pass the consultant bar (1.58); the fresh copy gets a new ID
+    and is checked under today's rules."""
+    from learner import num
+    state = load_notified()
+    done = set(state.get("resimulated", []))
+    latest = {}
+    for c in load_csv(CHECKS):
+        if c["verdict"] in ("PASS", "FAIL"):
+            latest[c["alpha_id"]] = c
+    rows = {r["alpha_id"]: r for r in load_csv(RESULTS) if r["alpha_id"]}
     subs = {s["id"] for s in load_csv(SUBMITTED)}
+    jobs = []
+    for a, c in latest.items():
+        r = rows.get(a)
+        if (r and a not in done and a not in subs and "OLD_SIMULATION" in c["failed"]
+                and abs(num(r["sharpe"])) >= cfg.get("consultant_min_sharpe", 1.58)):
+            jobs.append({**{k: r[k] for k in ("template", "field", "dataset", "window", "group", "expression")},
+                         "settings": json.loads(r["settings"] or "{}"), "repair": "resim", "parent": a,
+                         "depth": int(r["depth"] or 0)})
+        if len(jobs) >= cfg.get("resim_per_cycle", 10):
+            break
+    if jobs:
+        log(f"=== Re-simulating {len(jobs)} strong alphas BRAIN now calls OLD_SIMULATION: {', '.join(j['parent'] for j in jobs)}")
+        state["resimulated"] = sorted(done | {j["parent"] for j in jobs})
+        save_notified(state)
+        simulate_jobs(jobs, cfg, cycle)
+
+
+def super_candidates():
+    """Verified SuperAlphas not yet submitted, in the same shape as regular shortlist rows. Empty while today's
+    SuperAlpha quota is used: BRAIN allows 1 SuperAlpha submission per day ("reached quota of 1", 2026-10-19)."""
+    import superalpha as SA
+    submitted = load_csv(SUBMITTED)
+    subs = {s["id"] for s in submitted}
+    today_et = brain_today()
+    used = sum(1 for s in submitted if s.get("type") == "SUPER" and (s.get("submitted_at") or "")[:10] == today_et)
+    if used >= load_config().get("super_daily_quota", 1):
+        return []
     out = [{"alpha_id": r["alpha_id"], "sharpe": r["sharpe"], "fitness": r["fitness"], "turnover": r["turnover"],
             "self_corr": r["self_corr"], "settings": r["settings"], "family": "SUPER", "best_in_family": True,
             "risky": "", "super": True, "checked_at": r["created"],
@@ -444,6 +490,9 @@ def write_reports(cfg):
         elif alpha_id in backups:
             c, w = backups[alpha_id]
             reason = f"replaced by {w}, a stronger alpha making the same bet ({c:.2f}); kept as a backup"
+        elif (know.checks.get(alpha_id, {}).get("verdict") == "PASS"
+              and know.checks[alpha_id].get("checked_at", "") < cfg.get("rules_since", "")):
+            reason = "it was checked under the old (pre-consultant) rules; re-checking it under the consultant rules"
         elif know.checks.get(alpha_id, {}).get("verdict") == "PASS":
             reason = "being re-checked against a submission you just made"
         else:
@@ -492,7 +541,7 @@ def sync_submitted():
                              "universe": s.get("universe"), "decay": s.get("decay"),
                              "neutralization": s.get("neutralization"),
                              "submitted_at": a.get("dateSubmitted") or "",
-                             "sharpe": (a.get("is") or {}).get("sharpe", "")})
+                             "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": a.get("type", "")})
 
 
 def corr_screen(alpha_id, cfg):
@@ -558,7 +607,8 @@ def verify(alpha_id, cfg, brain_allowed=True):
     # Passed BRAIN before and only re-checked because you submitted something since: the exact
     # PnL check against every submission (incl. the new one) is enough, no need to wait for BRAIN.
     earlier = [c for c in load_csv(CHECKS) if c["alpha_id"] == alpha_id and c["verdict"] in ("PASS", "FAIL")]
-    if earlier and earlier[-1]["verdict"] == "PASS" and corr is not None:
+    if (earlier and earlier[-1]["verdict"] == "PASS" and corr is not None
+            and earlier[-1]["checked_at"] >= cfg.get("rules_since", "")):  # only a pass under today's rules
         return {"alpha_id": alpha_id, "checked_at": now, "verdict": "PASS", "failed": "",
                 "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
                 "detail": "re-confirmed by exact PnL check against all submissions"}
@@ -566,6 +616,13 @@ def verify(alpha_id, cfg, brain_allowed=True):
     if not brain_allowed:
         return "WAIT"
     checks, correlated = brain().check(alpha_id)
+    decisive = [c for c in checks if c.get("result") == "FAIL"]
+    if decisive:
+        # A definite FAIL (e.g. OLD_SIMULATION, LOW_SHARPE) decides it even while correlation checks are pending.
+        return {"alpha_id": alpha_id, "checked_at": now, "verdict": "FAIL",
+                "failed": ";".join(c["name"] for c in decisive) + (";NOT_ROBUST" if problems else ""),
+                "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
+                "detail": "; ".join(f"{c['name']} value={c.get('value')} limit={c.get('limit')}" for c in decisive)}
     if any(c.get("result") in ("PENDING", "ERROR") for c in checks):
         return None  # BRAIN hasn't finished, or its check errored: not verified, retry later
     self_check = next((c for c in checks if c["name"] == "SELF_CORRELATION"), None)
@@ -776,6 +833,7 @@ def run_cycle(cfg, dry_run=False):
             import time
             time.sleep(600)
             return True
+        resimulate_old(cfg, cycle)
     templates = load_templates()
     if not dry_run:
         report_invalid_ideas(templates)

@@ -340,7 +340,11 @@ class Knowledge:
         # losing 2023), so list them as passes marked RISKY instead of hiding them.
         risky_only = (check is not None and check["verdict"] == "FAIL" and check["failed"] == "NOT_ROBUST"
                       and self.cfg.get("robustness_mode", "block") == "warn")
-        if (check is None or check["verdict"] == "RETRY"
+        # A pass checked before the consultant rules (Sharpe 1.58, IS ladder, production correlation) no longer
+        # counts: three such alphas failed on 2026-10-19 (OLD_SIMULATION, Sharpe 1.43/1.45 < 1.58).
+        before_rules = (check is not None and check["verdict"] == "PASS"
+                        and (check.get("checked_at") or "") < self.cfg.get("rules_since", ""))
+        if (check is None or check["verdict"] == "RETRY" or before_rules
                 or ((check["verdict"] == "PASS" or risky_only) and self.check_is_stale(row, check))):
             row["passed"] = "Pending"
         elif risky_only:
