@@ -19,6 +19,7 @@ pnl_cache.json.gz
 novelty.json
 brain_session.json
 brain_face_id.json
+supers.csv
 state.enc
 *.log
 cycle*.log

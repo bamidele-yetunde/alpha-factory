@@ -192,5 +192,24 @@
     "pv1",
     "pv13"
   ],
-  "novelty_per_round": 25
+  "novelty_per_round": 25,
+  "super": {
+    "per_cycle": 2,
+    "neutralizations": [
+      "STATISTICAL",
+      "MARKET",
+      "SLOW_AND_FAST",
+      "CROWDING"
+    ],
+    "decays": [
+      2,
+      4
+    ],
+    "limits": [
+      10,
+      20,
+      30
+    ]
+  },
+  "sim_reserve": 100
 }

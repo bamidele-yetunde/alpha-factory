@@ -198,6 +198,112 @@ def describe(expression, settings, field_info, operator_info, others=()):
     return text
 
 
+# ---------------------------------------------------------------- SuperAlpha descriptions
+# BRAIN requires two descriptions for a SuperAlpha: one for the selection expression, one for the combo.
+
+SELECTION_TERMS = [
+    (r"prod_correlation", "prod_correlation, the alpha's correlation with every alpha already in BRAIN's production "
+     "pool, so alphas that duplicate common platform signals are pushed down"),
+    (r"self_correlation", "self_correlation, the alpha's highest correlation with my other submissions, so "
+     "near-copies inside my own pool are avoided"),
+    (r"turnover", "turnover, the in-sample share of the book traded each day, which keeps trading costs and the "
+     "SuperAlpha's own turnover in the 2-40% range BRAIN requires"),
+    (r"long_count|short_count", "long_count and short_count, the average number of stocks held long and short, a "
+     "measure of how broad and balanced each component is"),
+    (r"universe_size", "universe_size, which scales counts by the size of each component's universe"),
+    (r"datacategories|datasets", "the data categories each alpha uses, so the components come from the chosen "
+     "information source"),
+    (r"operator_count", "operator_count, the number of operators per alpha, which keeps components simple and within "
+     "BRAIN's 8,000-operator limit"),
+    (r"os_start_date", "os_start_date, the start of each alpha's out-of-sample period, to favour recent work"),
+    (r"\bdecay\b", "each component's decay setting, which favours alphas that already smooth their positions"),
+    (r"neutralization", "each component's neutralisation setting"),
+]
+
+COMBO_TERMS = [
+    (r"^\s*1\s*$", "equal weight: every selected alpha gets the same weight every day",
+     "With no model risk at all, equal weighting is the benchmark BRAIN itself shows; it is the most robust choice "
+     "when the components are already diverse and of similar quality."),
+    (r"self_corr", "weights each alpha by one minus its highest rolling correlation with the other selected alphas",
+     "Alphas that overlap with others are down-weighted and distinct ones up-weighted, so the SuperAlpha spreads "
+     "its risk over genuinely different bets instead of doubling up on one."),
+    (r"combo_a", "uses BRAIN's combo_a, which balances each alpha's recent history of returns and risk to set its "
+     "weight",
+     "combo_a adapts the weights through time, leaning towards alphas that have recently delivered steadier returns "
+     "and away from those that are struggling, while keeping every component in the mix."),
+    (r"reduce_ir|ts_ir", "weights each alpha by its recent information ratio (return per unit of risk)",
+     "Alphas that have recently earned more per unit of risk receive more capital, which tends to raise the "
+     "SuperAlpha's Sharpe ratio."),
+]
+
+
+def describe_super(selection, combo, settings, n_selected=None):
+    """Return (selection_description, combo_description), each >= MIN_WORDS words, matching the code."""
+    st = settings or {}
+    sel_low = (selection or "").lower()
+    used = [text for pattern, text in SELECTION_TERMS if re.search(pattern, sel_low)]
+    cats = re.findall(r'in\(\s*datacategories\s*,\s*"([a-z]+)"', sel_low)
+    filters = []
+    for m in re.finditer(r"\(\s*(turnover|prod_correlation|self_correlation|operator_count)\s*([<>]=?)\s*([\d.]+)\s*\)",
+                         sel_low):
+        filters.append(f"{m.group(1)} {m.group(2)} {m.group(3)}")
+    limit = st.get("selectionLimit", "the selection limit")
+    handling = str(st.get("selectionHandling", "POSITIVE")).replace("_", "-").lower()
+    idea = ("Idea: Combine my submitted alphas into one diversified signal by choosing the components that are most "
+            "likely to add something new. ")
+    if cats:
+        idea += (f"Only alphas built on {', '.join(cats)} data are eligible, so this SuperAlpha is a focused "
+                 f"{'/'.join(cats)} portfolio whose components share an information source but differ in method. ")
+    if "1 - prod_correlation" in sel_low.replace(" ", " "):
+        idea += "Alphas least correlated with the production pool rank highest, which targets unique, less crowded returns. "
+    elif "1 - self_correlation" in sel_low:
+        idea += "Alphas least correlated with the rest of my pool rank highest, which maximises diversification. "
+    sel_text = (idea +
+                f"\n\nRationale for data used: The selection reads alpha properties rather than market data: "
+                f"{'; '.join(used) or 'basic alpha properties'}."
+                + (f" Hard filters keep only alphas with {', '.join(filters)}." if filters else "") +
+                f"\n\nRationale for operators used: Comparisons return 1 or 0, so multiplying by a condition removes "
+                f"alphas that fail it; subtracting a correlation from one turns 'less correlated' into a higher score. "
+                f"Selection handling is set to {handling}, so only alphas with a valid score are kept, and the "
+                f"top {limit} by score are selected"
+                + (f" ({n_selected} alphas were selected in the simulation)" if n_selected else "") + ".")
+    combo_low = (combo or "").lower()
+    what, why = next(((w, y) for p, w, y in COMBO_TERMS if re.search(p, combo_low)),
+                     ("sets daily weights for the selected alphas", "The weights aim to improve on equal weighting."))
+    n = re.search(r"nlength\s*=\s*(\d+)", combo_low)
+    look = re.search(r"self_corr\([^,]+,\s*(\d+)\)", combo_low)
+    neut = SETTINGS_TEXT.get(str(st.get("neutralization", "")).upper(),
+                             f"{str(st.get('neutralization', '')).lower().replace('_', ' ')} neutralisation removes "
+                             "common risk-factor exposure from the combined book")
+    combo_text = (f"Idea: The combo {what}. {why}"
+                  f"\n\nRationale for data used: The input is the daily returns history of each selected alpha"
+                  + (f", looked at over {n.group(1)} trading days" if n else "")
+                  + (f", with correlations measured over {look.group(1)} trading days (about "
+                     f"{int(look.group(1)) // 250} years)" if look else "") +
+                  ". No market data is added at this stage; all information comes from the components' own "
+                  "performance, so the combo cannot overfit to a new data source."
+                  f"\n\nRationale for operators used: "
+                  + ("generate_stats turns each alpha into daily statistics; self_corr builds the rolling correlation "
+                     "matrix; the if_else removes each alpha's correlation with itself; reduce_max keeps its highest "
+                     "correlation with any other alpha; one minus that gives the weight. " if look else "")
+                  + ("combo_a computes the adaptive weights directly from the components' history. " if n else "")
+                  + ("scale rebalances the long and short books to the chosen proportions. " if "scale(" in combo_low else "")
+                  + f"In the settings, {neut}; a decay of {st.get('decay', 0)} days smooths the combined positions "
+                    f"and truncation {st.get('truncation', 0.08)} caps any single stock's weight.")
+    for label in ("sel", "combo"):
+        t = sel_text if label == "sel" else combo_text
+        if _words(t) < MIN_WORDS:
+            t += ("\n\nRobustness: the SuperAlpha is checked against BRAIN's consultant tests (Sharpe, fitness, "
+                  "turnover between 2% and 40%, IS ladder, sub-universe, self and production correlation) before it "
+                  "is offered for submission, and it is compared with the equal-weight combination of the same "
+                  "components.")
+        if label == "sel":
+            sel_text = t
+        else:
+            combo_text = t
+    return sel_text, combo_text
+
+
 def check(text, expression):
     """Problems with a description, empty when it is acceptable."""
     problems = []

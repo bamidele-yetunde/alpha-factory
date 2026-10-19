@@ -232,13 +232,185 @@ def build_basket(candidates, cfg):
     return basket, backups, failing
 
 
+def description_inputs():
+    """Field and operator descriptions from BRAIN, used to write each alpha's description."""
+    fields = {r["id"]: {"dataset": r["dataset"], "description": r["description"]} for r in load_csv(FIELDS)}
+    ops = {o["name"]: o.get("description") or "" for o in json.loads(OPERATORS.read_text(encoding="utf-8"))}
+    return fields, ops
+
+
+def describe_regular(alpha_id, expression, settings):
+    """Attach a >= 100-word description (Idea / Rationale for data used / Rationale for operators used) to a
+    regular alpha before it is offered for submission. Done once per alpha."""
+    import descriptions as D
+    state = load_notified()
+    done = set(state.get("described", []))
+    if alpha_id in done:
+        return
+    fields, ops = description_inputs()
+    st = settings if isinstance(settings, dict) else json.loads(settings or "{}")
+    text = D.describe(expression, {**load_config()["settings"], **st}, fields, ops)
+    problems = D.check(text, expression)
+    if problems:
+        log(f"DESCRIPTION for {alpha_id} not attached: {problems}")
+        return
+    brain().describe(alpha_id, regular=text)
+    log(f"DESCRIPTION attached to {alpha_id} ({D._words(text)} words)")
+    state = load_notified()
+    state["described"] = sorted(set(state.get("described", [])) | {alpha_id})
+    save_notified(state)
+
+
+def quota_low(cfg):
+    """True when BRAIN's daily simulation quota (5,000 for this consultant account) is nearly used up."""
+    rl = getattr(_brain, "rate_limit", None) or {}
+    try:
+        left = int(rl.get("X-Ratelimit-Remaining"))
+    except (TypeError, ValueError):
+        return False
+    if left < cfg.get("sim_reserve", 100):
+        log(f"QUOTA: only {left} simulations left today; pausing simulations until BRAIN resets the quota")
+        return True
+    return False
+
+
+def run_super_round(cfg, jobs=None):
+    """SuperAlphas, the main target: finish checks still running, then simulate `super.per_cycle` new recipes,
+    verify the ones that pass in-sample and attach both descriptions."""
+    import superalpha as SA
+    from brain import BrainBusy, BrainError, BrainLoginBlocked
+    sc = cfg.get("super", {})
+    for row in [r for r in SA.load() if r["verdict"] == "CHECKING"][:4]:
+        check_super(row, cfg)
+    n = sc.get("per_cycle", 2)
+    if not n or quota_low(cfg):
+        return
+    subs = load_csv(SUBMITTED)
+    field_dataset = {r["id"]: r["dataset"] for r in load_csv(FIELDS)}
+    jobs = jobs or SA.plan(cfg, SA.pool_categories([s["code"] for s in subs], field_dataset), n)
+    if not jobs:
+        return
+    log(f"=== SuperAlphas: simulating {len(jobs)} recipes: {', '.join(j['recipe'] for j in jobs)}")
+
+    def one(job):
+        row = {"created": datetime.now().isoformat(timespec="seconds"), "recipe": job["recipe"],
+               "selection": job["selection"], "combo": job["combo"], "settings": json.dumps(job["settings"])}
+        try:
+            row.update(SA.summarize(brain().simulate_super(job["selection"], job["combo"], job["settings"])))
+        except BrainLoginBlocked:
+            raise
+        except BrainBusy as e:
+            log(f"  SUPER {job['recipe']}: BRAIN busy, will retry ({str(e)[:80]})")
+            return None
+        except BrainError as e:
+            row["error"] = str(e)[:300]
+        return row
+
+    with ThreadPoolExecutor(max_workers=min(len(jobs), 2)) as pool:
+        rows = [r for r in pool.map(one, jobs) if r]
+    for row in rows:
+        row.pop("pending", None)
+        SA.append(row)
+        status = (f"ERROR {row['error'][:80]}" if row.get("error") else
+                  f"{row['alpha_id']} sharpe={row['sharpe']} fitness={row['fitness']} turnover={row['turnover']}"
+                  + (f" [{row['failed_checks']}]" if row["failed_checks"] else " in-sample PASS"))
+        log(f"  SUPER SIM {status}  ({row['recipe']})")
+        if not row.get("error") and not row["failed_checks"]:
+            verify_super(row, cfg)
+
+
+def _update_super(row):
+    import superalpha as SA
+    rows = SA.load()
+    for i, r in enumerate(rows):
+        if r["alpha_id"] == row["alpha_id"] and r["recipe"] == row["recipe"]:
+            rows[i] = {**r, **{k: row.get(k, r.get(k)) for k in SA.COLUMNS}}
+    SA.rewrite(rows)
+
+
+def verify_super(row, cfg):
+    """Exact correlation and robustness first (seconds); then attach the two descriptions and a name, which BRAIN
+    requires (SELECTION/COMBO_DESCRIPTION_LENGTH tests); then BRAIN's own submission check."""
+    import descriptions as D
+    alpha_id = row["alpha_id"]
+    corr, closest, blocked = corr_screen(alpha_id, cfg)
+    sharpes, problems = robustness(alpha_id, cfg)
+    row["self_corr"], row["corr_with"] = (round(corr, 4) if corr is not None else ""), closest
+    if blocked or problems:
+        row["verdict"] = "FAIL"
+        row["verify_detail"] = "; ".join(
+            ([f"SELF_CORRELATION {corr:.3f} with {closest} (exact PnL check)"] if blocked else [])
+            + ([f"NOT_ROBUST {', '.join(problems)}"] if problems else []))
+        log(f"  SUPER VERIFY {alpha_id}: FAIL  {row['verify_detail']}")
+        _update_super(row)
+        return
+    settings = json.loads(row["settings"])
+    sel_text, combo_text = D.describe_super(row["selection"], row["combo"], settings)
+    issues = D.check(sel_text, row["selection"]) + D.check(combo_text, row["combo"])
+    if issues:
+        log(f"  SUPER {alpha_id}: description problems {issues}; not offered")
+        return
+    name = "SA " + row["recipe"].replace("|", " ")[:60]
+    brain().describe(alpha_id, selection=sel_text, combo=combo_text, name=name)
+    row["described"] = "yes"
+    log(f"  SUPER {alpha_id}: descriptions attached ({D._words(sel_text)} + {D._words(combo_text)} words)")
+    check_super(row, cfg)
+
+
+def check_super(row, cfg):
+    """BRAIN's submission check for a SuperAlpha. Its correlation checks can take a while: until they finish the
+    SuperAlpha stays CHECKING and is looked at again next round."""
+    from brain import BrainBusy, BrainError
+    try:
+        checks, _ = brain().check(row["alpha_id"])
+    except BrainBusy:
+        checks = None
+    except BrainError as e:
+        log(f"  SUPER CHECK {row['alpha_id']}: {str(e)[:100]}")
+        return
+    if not checks or any(c.get("result") == "PENDING" for c in checks):
+        row["verdict"] = "CHECKING"
+        log(f"  SUPER CHECK {row['alpha_id']}: BRAIN still computing its correlation checks; looking again next round")
+    else:
+        failed = [f"{c['name']} value={c.get('value')} limit={c.get('limit')}" for c in checks
+                  if c.get("result") == "FAIL"]
+        row["verdict"] = "FAIL" if failed else "PASS"
+        row["verify_detail"] = "; ".join(failed)
+        log(f"  SUPER CHECK {row['alpha_id']}: {row['verdict']} {row['verify_detail']}")
+    _update_super(row)
+
+
+def super_candidates():
+    """Verified SuperAlphas not yet submitted, in the same shape as regular shortlist rows."""
+    import superalpha as SA
+    subs = {s["id"] for s in load_csv(SUBMITTED)}
+    out = [{"alpha_id": r["alpha_id"], "sharpe": r["sharpe"], "fitness": r["fitness"], "turnover": r["turnover"],
+            "self_corr": r["self_corr"], "settings": r["settings"], "family": "SUPER", "best_in_family": True,
+            "risky": "", "super": True, "checked_at": r["created"],
+            "expression": f"SUPER selection: {r['selection']} | combo: {r['combo']}"}
+           for r in SA.load() if r["verdict"] == "PASS" and r["alpha_id"] not in subs]
+    return sorted(out, key=lambda r: -float(r["fitness"] or 0))
+
+
 def write_reports(cfg):
     """Rewrite insights.md and READY_TO_SUBMIT.csv: the basket of verified alphas that can all be
-    submitted together (each below 0.7 with your submissions and below 0.65 with each other)."""
+    submitted together (each below 0.7 with your submissions and below 0.65 with each other).
+    SuperAlphas (the main target) go first, then regular alphas."""
     know = knowledge(cfg)
     know.write_insights(INSIGHTS)
     before = {r["alpha_id"] for r in load_csv(READY)}
-    ready, backups, failing = build_basket(know.shortlist(200, all_passes=True), cfg)
+    supers = super_candidates()
+    ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
+    super_ids = {r["alpha_id"] for r in supers}
+    if failing.keys() & super_ids:
+        import superalpha as SA
+        rows = SA.load()
+        for row in rows:
+            if row["alpha_id"] in failing:
+                c, w = failing[row["alpha_id"]]
+                row["verdict"], row["verify_detail"] = "FAIL", f"now {c:.2f} correlated with your submission {w}"
+        SA.rewrite(rows)
+        failing = {a: v for a, v in failing.items() if a not in super_ids}
     now = datetime.now().isoformat(timespec="seconds")
     if failing:
         # A new submission made these too similar: record it so they leave the list for good.
@@ -249,12 +421,18 @@ def write_reports(cfg):
             for a, (c, w) in failing.items()])
     from notify import code, esc, telegram
     for r in ready:
+        if not r.get("super"):
+            try:  # every regular alpha on the list carries its description (done once per alpha)
+                describe_regular(r["alpha_id"], r["expression"], r["settings"])
+            except Exception as e:
+                log(f"DESCRIPTION for {r['alpha_id']} failed, will retry: {str(e)[:120]}")
         if r["alpha_id"] not in before:
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}; basket now {len(ready)}) {r['expression']} {r['settings']}")
             risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
             telegram("\n".join([
-                f"✅ NEW PASS: {code(r['alpha_id'])}{risk}",
+                (f"\U0001F31F NEW SUPER ALPHA PASS: {code(r['alpha_id'])} (descriptions attached)" if r.get("super")
+                 else f"✅ NEW PASS: {code(r['alpha_id'])}{risk} (description attached)"),
                 f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])}",
                 f"Ready list: {len(ready)} - all can be submitted together, in any order."]))
     for alpha_id in before - {r["alpha_id"] for r in ready}:
@@ -282,12 +460,12 @@ def write_reports(cfg):
     with READY.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["alpha_id", "family", "best_in_family", "risky", "sharpe", "fitness", "turnover",
-                         "self_corr", "yearly_sharpe", "verified_at", "expression", "settings"])
+                         "self_corr", "yearly_sharpe", "verified_at", "expression", "settings", "type"])
         for n, r in enumerate(ready, 1):
-            check = know.checks[r["alpha_id"]]
+            check = know.checks.get(r["alpha_id"]) or {"yearly_sharpe": "", "checked_at": r.get("checked_at", "")}
             writer.writerow([r["alpha_id"], n, "yes", r["risky"], r["sharpe"], r["fitness"], r["turnover"],
                              r["self_corr"], check["yearly_sharpe"], check["checked_at"], r["expression"],
-                             r["settings"]])
+                             r["settings"], "SUPER" if r.get("super") else "REGULAR"])
     pnl_book().save()
     return know
 
@@ -522,6 +700,8 @@ def simulate_jobs(jobs, cfg, cycle):
     """Simulate jobs concurrently, appending each result to results.csv as soon as it finishes."""
     from brain import BrainBusy, BrainError, BrainLoginBlocked
     from learner import type_ok
+    if quota_low(cfg):
+        return
     # Last safety net, whatever made the idea: BRAIN rejects list fields outside vec_*(...) and vice versa.
     kinds = {r["id"]: r["type"] for r in load_csv(FIELDS)}
     bad = [j for j in jobs if not type_ok(j["expression"], kinds)]
@@ -584,6 +764,18 @@ def run_cycle(cfg, dry_run=False):
         sync_submitted()
         verify_pending(cfg)
         update_novelty(cfg)
+        # SuperAlphas first: they are the main target and carry more weight than regular alphas.
+        from brain import BrainLoginBlocked
+        try:
+            run_super_round(cfg)
+        except BrainLoginBlocked:
+            raise
+        except Exception as e:
+            log(f"SuperAlpha round failed, carrying on with regular alphas: {str(e)[:150]}")
+        if quota_low(cfg):
+            import time
+            time.sleep(600)
+            return True
     templates = load_templates()
     if not dry_run:
         report_invalid_ideas(templates)

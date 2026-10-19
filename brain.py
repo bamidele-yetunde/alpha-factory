@@ -272,6 +272,8 @@ class Brain:
         """Run one simulation and return the resulting alpha record (with IS stats and checks)."""
         payload = {"type": "REGULAR", "settings": settings, "regular": expression}
         r = self.request("POST", "/simulations", json=payload)
+        # BRAIN's daily simulation quota (consultants have one): remembered so the bot can stay under it.
+        self.rate_limit = {k: r.headers.get(k) for k in ("X-Ratelimit-Limit", "X-Ratelimit-Remaining")}
         if r.status_code != 201:
             raise BrainError(f"Simulation rejected ({r.status_code}): {r.text[:300]}")
         # A simulation stuck on BRAIN's side must not hang the whole run (it did on 2026-10-07).
@@ -279,6 +281,35 @@ class Brain:
         if "alpha" not in result:
             raise BrainError(result.get("message") or f"status {result.get('status')}")
         return self.alpha(result["alpha"])
+
+    def simulate_super(self, selection, combo, settings):
+        """Simulate a SuperAlpha (a weighted combination of your submitted alphas) and return its record.
+        SuperAlphas are slower than regular alphas, so the wait is longer (60 minutes)."""
+        payload = {"type": "SUPER", "settings": settings, "selection": selection, "combo": combo}
+        r = self.request("POST", "/simulations", json=payload)
+        self.rate_limit = {k: r.headers.get(k) for k in ("X-Ratelimit-Limit", "X-Ratelimit-Remaining")}
+        if r.status_code != 201:
+            raise BrainError(f"SuperAlpha simulation rejected ({r.status_code}): {r.text[:300]}")
+        result = self._wait(r.headers["Location"], max_seconds=60 * 60, on_timeout=BrainStuck).json()
+        if "alpha" not in result:
+            raise BrainError(result.get("message") or f"status {result.get('status')}")
+        return self.alpha(result["alpha"])
+
+    def describe(self, alpha_id, regular=None, selection=None, combo=None, name=None):
+        """Attach descriptions (and a name) to an alpha: regular alphas have one description, SuperAlphas
+        one for the selection and one for the combo (both required to submit)."""
+        body = {}
+        if regular is not None:
+            body["regular"] = {"description": regular}
+        if selection is not None:
+            body["selection"] = {"description": selection}
+        if combo is not None:
+            body["combo"] = {"description": combo}
+        if name:
+            body["name"] = name
+        r = self.request("PATCH", f"/alphas/{alpha_id}", json=body)
+        if r.status_code >= 300:
+            raise BrainError(f"Could not set description on {alpha_id} ({r.status_code}): {r.text[:200]}")
 
     def alpha(self, alpha_id):
         r = self.request("GET", f"/alphas/{alpha_id}")
