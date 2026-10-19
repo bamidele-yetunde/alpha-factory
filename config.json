@@ -153,8 +153,10 @@
     }
   },
   "combo_universes": [
-    "TOP3000",
-    "TOP2000"
+    "MINVOL1M",
+    "TOP2000",
+    "TOP2500",
+    "TOP3000"
   ],
   "mode": "normal",
   "sweep_target_passes": 5,
@@ -171,8 +173,10 @@
     "universe_swap"
   ],
   "repair_universes": [
-    "TOP3000",
-    "TOP2000"
+    "MINVOL1M",
+    "TOP2000",
+    "TOP2500",
+    "TOP3000"
   ],
   "retry_check_minutes": 30,
   "explore_share": 0.7,
@@ -212,11 +216,76 @@
       10,
       20,
       30
-    ]
+    ],
+    "min_region_alphas": 10
   },
   "sim_reserve": 100,
   "rules_since": "2026-10-18T00:00:00",
   "super_daily_quota": 1,
   "consultant_min_sharpe": 1.58,
-  "resim_per_cycle": 10
+  "resim_per_cycle": 10,
+  "regions": {
+    "EUR": {
+      "universe": "TOP2500",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "COUNTRY",
+        "MARKET"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector",
+        "country"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
+    },
+    "GLB": {
+      "universe": "TOP3000",
+      "neutralization": [
+        "COUNTRY",
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "MARKET"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector",
+        "country"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
+    },
+    "ASI": {
+      "universe": "MINVOL1M",
+      "neutralization": [
+        "COUNTRY",
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "MARKET"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector",
+        "country"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ],
+      "maxTrade": "ON"
+    }
+  },
+  "dataset_batch": 60
 }

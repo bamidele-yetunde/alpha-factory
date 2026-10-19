@@ -58,9 +58,10 @@ RESULT_COLUMNS = ["cycle", "expression", "settings", "template", "field", "datas
                   "returns", "drawdown", "margin", "long_count", "short_count", "failed_checks",
                   "check_details", "error"]
 SUBMISSION_COLUMNS = ["alpha_id", "field", "status", "failed_checks"]
-FIELD_COLUMNS = ["id", "dataset", "type", "coverage", "alpha_count", "description"]
+FIELD_COLUMNS = ["id", "dataset", "type", "coverage", "alpha_count", "description", "region"]
 CHECK_COLUMNS = ["alpha_id", "checked_at", "verdict", "failed", "self_corr", "corr_with", "yearly_sharpe", "detail"]
-SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at", "sharpe", "type"]
+SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submitted_at", "sharpe", "type",
+                     "region"]
 
 ACTIVITY_LOG = HERE / "activity_log.txt"
 
@@ -144,10 +145,18 @@ def load_fields(cfg):
                  "or list field names under \"fields\" in config.json.")
     excluded = {e.split(":", 1)[1] for e in cfg.get("exclude", []) if e.startswith("field:")}
     excluded_datasets = set(cfg.get("exclude_datasets_from_blanks", []))
-    return [(r["id"], r["dataset"], r["type"]) for r in rows
+    regions = {"USA"} | set(cfg.get("regions", {}))
+    # Fields of another region carry it in the dataset label (e.g. "news12@EUR"): everything that works per
+    # dataset (exploration, field swaps, combinations) then automatically stays inside one region.
+    return [(r["id"], dataset_label(r), r["type"]) for r in rows
             if r["type"] in ("MATRIX", "VECTOR") and r["id"] not in excluded
-            and r["dataset"] not in excluded_datasets
+            and r["dataset"] not in excluded_datasets and (r.get("region") or "USA") in regions
             and float(r["coverage"] or 0) >= cfg["min_field_coverage"]]
+
+
+def dataset_label(row):
+    region = row.get("region") or "USA"
+    return row["dataset"] if region == "USA" else f"{row['dataset']}@{region}"
 
 
 def known_names():
@@ -285,9 +294,15 @@ def run_super_round(cfg, jobs=None):
     n = sc.get("per_cycle", 2)
     if not n or quota_low(cfg):
         return
-    subs = load_csv(SUBMITTED)
+    subs = [s for s in load_csv(SUBMITTED) if s.get("type", "REGULAR") != "SUPER"]
     field_dataset = {r["id"]: r["dataset"] for r in load_csv(FIELDS)}
-    jobs = jobs or SA.plan(cfg, SA.pool_categories([s["code"] for s in subs], field_dataset), n)
+    # Regions with enough submitted alphas to fill a SuperAlpha (user, 2026-10-19: "more than 10 in a region").
+    by_region = {}
+    for s in subs:
+        by_region.setdefault(s.get("region") or "USA", []).append(s["code"])
+    eligible = {r: SA.pool_categories(codes, field_dataset) for r, codes in by_region.items()
+                if len(codes) >= sc.get("min_region_alphas", 10)}
+    jobs = jobs or SA.plan(cfg, eligible, n)
     if not jobs:
         return
     log(f"=== SuperAlphas: simulating {len(jobs)} recipes: {', '.join(j['recipe'] for j in jobs)}")
@@ -541,7 +556,8 @@ def sync_submitted():
                              "universe": s.get("universe"), "decay": s.get("decay"),
                              "neutralization": s.get("neutralization"),
                              "submitted_at": a.get("dateSubmitted") or "",
-                             "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": a.get("type", "")})
+                             "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": a.get("type", ""),
+                             "region": s.get("region", "USA")})
 
 
 def corr_screen(alpha_id, cfg):
@@ -549,7 +565,9 @@ def corr_screen(alpha_id, cfg):
     number). Returns (highest corr, with which alpha, blocked). Not blocked at >= 0.7 only when BRAIN's
     exception might apply (Sharpe >= 10% above every submitted alpha it correlates with); BRAIN decides."""
     from learner import num
-    subs = {s["id"]: num(s.get("sharpe"), 0) for s in load_csv(SUBMITTED)}
+    # BRAIN compares an alpha with your submissions in the same region only.
+    region = alpha_region(alpha_id)
+    subs = {s["id"]: num(s.get("sharpe"), 0) for s in load_csv(SUBMITTED) if (s.get("region") or "USA") == region}
     book, limit = pnl_book(), cfg.get("corr_limit", 0.7)
     corrs = {o: book.corr(alpha_id, o) for o in subs if o != alpha_id}
     corrs = {o: c for o, c in corrs.items() if c is not None}
@@ -562,6 +580,27 @@ def corr_screen(alpha_id, cfg):
     mine = abs(next((num(r["sharpe"]) for r in load_csv(RESULTS) if r["alpha_id"] == alpha_id), 0))
     exception = all(subs[o] > 0 and mine >= 1.1 * subs[o] for o in over)
     return corrs[closest], closest, not exception
+
+
+def region_counts(cfg):
+    """Submitted regular alphas per region (USA plus every enabled region)."""
+    counts = {r: 0 for r in ["USA"] + list(cfg.get("regions", {}))}
+    for s in load_csv(SUBMITTED):
+        if s.get("type", "REGULAR") != "SUPER":
+            counts[s.get("region") or "USA"] = counts.get(s.get("region") or "USA", 0) + 1
+    return counts
+
+
+def alpha_region(alpha_id):
+    """Region an alpha was simulated in (regular results or SuperAlphas); USA when not recorded."""
+    import superalpha as SA
+    for r in load_csv(RESULTS):
+        if r["alpha_id"] == alpha_id:
+            return json.loads(r["settings"] or "{}").get("region", "USA")
+    for r in SA.load():
+        if r["alpha_id"] == alpha_id:
+            return json.loads(r["settings"] or "{}").get("region", "USA")
+    return "USA"
 
 
 def robustness(alpha_id, cfg):
@@ -998,18 +1037,21 @@ def cmd_fields(args):
     add_datasets(args.datasets)
 
 
-def add_datasets(datasets):
-    """Download the data fields of these datasets into fields.csv. Returns {dataset: field count}."""
+def add_datasets(datasets, region="USA", universe=None, delay=None):
+    """Download the data fields of these datasets (in one region) into fields.csv. Returns {dataset: count}."""
     cfg = load_config()["settings"]
-    existing = {r["id"]: r for r in load_csv(FIELDS)}
+    universe = universe or cfg["universe"]
+    delay = cfg["delay"] if delay is None else delay
+    existing = {(r["id"], r.get("region") or "USA"): r for r in load_csv(FIELDS)}
     counts = {}
     for dataset in datasets:
-        fields = brain().data_fields(cfg["region"], cfg["universe"], cfg["delay"], dataset)
+        fields = brain().data_fields(region, universe, delay, dataset)
         for fd in fields:
-            existing[fd["id"]] = {"id": fd["id"], "dataset": (fd.get("dataset") or {}).get("id", dataset),
-                                  "type": fd.get("type"), "coverage": fd.get("coverage"),
-                                  "alpha_count": fd.get("alphaCount"), "description": fd.get("description")}
-        log(f"{dataset}: {len(fields)} fields")
+            existing[(fd["id"], region)] = {
+                "id": fd["id"], "dataset": (fd.get("dataset") or {}).get("id", dataset), "type": fd.get("type"),
+                "coverage": fd.get("coverage"), "alpha_count": fd.get("alphaCount"),
+                "description": fd.get("description"), "region": region}
+        log(f"{dataset}@{region}: {len(fields)} fields")
         counts[dataset] = len(fields)
     with FIELDS.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELD_COLUMNS)
@@ -1035,39 +1077,46 @@ def discover_datasets(cfg):
     new ones to fields.csv, so new families get explored as soon as BRAIN unlocks them."""
     from brain import BrainError
     from notify import code, esc, telegram
-    state = load_notified()
-    last = state.get("datasets_checked_at")
-    if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < cfg.get("dataset_check_hours", 24) * 3600:
-        return
     st = cfg["settings"]
-    try:
-        found, params = [], {"instrumentType": st["instrumentType"], "region": st["region"], "delay": st["delay"],
-                             "universe": st["universe"], "limit": 50, "offset": 0}
-        while True:
-            r = brain().request("GET", "/data-sets", params=params)
-            if r.status_code != 200:
-                raise BrainError(f"data-sets {r.status_code}")
-            data = r.json()
-            found += data["results"]
-            params["offset"] += params["limit"]
-            if not data["results"] or params["offset"] >= data["count"]:
-                break
-        known = {r["dataset"] for r in load_csv(FIELDS)}
-        new = [d["id"] for d in found if d["id"] not in known]
-        if new:
-            counts = add_datasets(new)
-            log(f"NEW DATASETS from BRAIN: {counts} - their fields are now explored")
-            telegram("🆕 New BRAIN data available to your account: "
-                     + ", ".join(f"{code(d)} ({n} fields)" for d, n in counts.items())
-                     + "\nThe bot has started exploring it.")
-        else:
-            log(f"Dataset check: no new datasets ({len(found)} available, all known)")
-    except (BrainError, KeyError, ValueError) as e:
-        log(f"Dataset check failed, will retry next run: {str(e)[:120]}")
-        return
-    state = load_notified()
-    state["datasets_checked_at"] = datetime.now().isoformat(timespec="seconds")
-    save_notified(state)
+    targets = [("USA", st["universe"])] + [(r, p["universe"]) for r, p in cfg.get("regions", {}).items()]
+    for region, universe in targets:
+        state = load_notified()
+        checked = state.get("datasets_checked", {})
+        last = checked.get(region) or (state.get("datasets_checked_at") if region == "USA" else None)
+        if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < cfg.get("dataset_check_hours", 24) * 3600:
+            continue
+        try:
+            found, params = [], {"instrumentType": st["instrumentType"], "region": region, "delay": st["delay"],
+                                 "universe": universe, "limit": 50, "offset": 0}
+            while True:
+                r = brain().request("GET", "/data-sets", params=params)
+                if r.status_code != 200:
+                    raise BrainError(f"data-sets {r.status_code}")
+                data = r.json()
+                found += data["results"]
+                params["offset"] += params["limit"]
+                if not data["results"] or params["offset"] >= data["count"]:
+                    break
+            known = {r["dataset"] for r in load_csv(FIELDS) if (r.get("region") or "USA") == region}
+            new = [d["id"] for d in found if d["id"] not in known]
+            # A region's first download is large (EUR 33k fields): `dataset_batch` datasets per run until done.
+            batch = new[:cfg.get("dataset_batch", 60)]
+            if batch:
+                counts = add_datasets(batch, region, universe)
+                log(f"NEW DATASETS {region}: {len(counts)} added ({sum(counts.values())} fields); "
+                    f"{len(new) - len(batch)} more to download in later runs")
+                if not known:
+                    telegram(f"\U0001F30D The bot has started exploring {esc(region)} ({len(found)} datasets). "
+                             f"Once you have 10 submitted {esc(region)} alphas it will also build {esc(region)} SuperAlphas.")
+            else:
+                log(f"Dataset check {region}: no new datasets ({len(found)} available, all known)")
+        except (BrainError, KeyError, ValueError) as e:
+            log(f"Dataset check {region} failed, will retry next run: {str(e)[:120]}")
+            continue
+        if len(new) <= len(batch):  # everything for this region downloaded: next check in a day
+            state = load_notified()
+            state.setdefault("datasets_checked", {})[region] = datetime.now().isoformat(timespec="seconds")
+            save_notified(state)
 
 
 def exploration_report(know, cfg):
@@ -1129,6 +1178,9 @@ def heartbeat(cfg):
               f"Working on: {esc(working_on)}",
               f"Explored: {len(know.tried_fields & all_fields)} of {len(all_fields)} data fields; "
               f"{len(know.burned_fields)} worn-out fields skipped",
+              "Regions (submitted alphas; SuperAlphas from 10): " + ", ".join(
+                  f"{r} {n}" + (" ✓" if n >= cfg.get("super", {}).get("min_region_alphas", 10) else "/10")
+                  for r, n in region_counts(cfg).items()),
               f"Total submitted from the tool: {len(submitted)}"]
     if telegram("\n".join(lines)):
         state.update(heartbeat_at=now.isoformat(timespec="seconds"), sims=len(know.sims), verified=len(verified))

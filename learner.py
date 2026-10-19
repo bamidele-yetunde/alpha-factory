@@ -120,6 +120,11 @@ def fields_in(expr):
     return {t for t in re.findall(r"\b[a-z_][a-z0-9_]*\b(?!\s*[(=])", expr.lower()) if t not in GROUPS}
 
 
+def region_of(dataset_label):
+    """Region of a dataset label: "news12@EUR" -> "EUR", "news12" -> "USA"."""
+    return dataset_label.split("@", 1)[1] if "@" in (dataset_label or "") else "USA"
+
+
 def type_ok(expr, field_kind):
     """List (VECTOR) fields only inside vec_*(...), and vec_*(...) only around list fields: anything
     else BRAIN rejects ("status FAIL"). 2,365 simulations were lost this way by 2026-10-13, all from
@@ -409,13 +414,11 @@ class Knowledge:
 
         fast = set(cfg.get("fast_datasets", []))
 
-        def pick_field(kind, exclude_dataset=None, explore=False, only=None, template=None):
-            if only is not None:
-                # Short-window shapes need data that changes daily (news, options, social, price):
-                # on quarterly fundamentals a 5-22 day change only copies the filing date.
-                keep = lambda d: d in only
-            else:
-                keep = lambda d: True
+        def pick_field(kind, exclude_dataset=None, explore=False, only=None, template=None, region=None):
+            base_keep = (lambda d: d.split("@")[0] in only) if only is not None else (lambda d: True)
+            # Short-window shapes need data that changes daily (news, options, social, price): on quarterly
+            # fundamentals a 5-22 day change only copies the filing date. `region`: same region as field 1.
+            keep = (lambda d: base_keep(d) and region_of(d) == region) if region else base_keep
             if explore:
                 # Even spread over datasets that still have unexplored fields, then a random one of them;
                 # no dataset gets more than a quarter of the exploration ideas in one cycle.
@@ -465,12 +468,19 @@ class Knowledge:
             if "field2" in names:
                 # Second signal from a different dataset: combinations rarely match anything submitted.
                 # The second field only needs to be new to the shape when it is the exploration slot too.
-                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"], explore=False)
+                fill["field2"], _ = pick_field("MATRIX", exclude_dataset=row["dataset"], explore=False,
+                                               region=region_of(row["dataset"]) if row["dataset"] else "USA")
                 if not fill["field2"]:
                     continue
             # Universe first: smaller universes get their own groups, neutralisation, decay and truncation.
-            universe = self.pick("universe", search["universe"]) if search.get("universe") else None
-            prof = {**search, **cfg.get("universe_profiles", {}).get(universe or "", {})}
+            # A field from another region (dataset "news12@EUR") is simulated in that region, with its profile.
+            region = region_of(row["dataset"]) if row["dataset"] else "USA"
+            if region != "USA":
+                prof = {**search, **cfg["regions"][region]}
+                universe = prof["universe"]
+            else:
+                universe = self.pick("universe", search["universe"]) if search.get("universe") else None
+                prof = {**search, **cfg.get("universe_profiles", {}).get(universe or "", {})}
             if "window" in names:
                 row["window"] = fill["window"] = self.pick("window", prof["windows"])
             if "group" in names:
@@ -481,6 +491,10 @@ class Knowledge:
                         "neutralization": self.pick("neutralization", prof["neutralization"])}
             if universe:
                 settings["universe"] = universe
+            if region != "USA":
+                settings["region"] = region
+                if prof.get("maxTrade"):
+                    settings["maxTrade"] = prof["maxTrade"]
             if prof.get("truncation"):
                 settings["truncation"] = self.pick("truncation", prof["truncation"])
             expr = template.format(**fill)
@@ -618,7 +632,9 @@ class Knowledge:
         windows = {str(w) for w in cfg["search"]["windows"]}
         ok_checks = {"LOW_SHARPE", "LOW_FITNESS", "LOW_SUB_UNIVERSE_SHARPE"}
         combo_universes = set(cfg.get("combo_universes", ["TOP3000"]))
-        universe_of = lambda r: json.loads(r["settings"] or "{}").get("universe", "TOP3000")
+        # (region, universe): USA and GLB both have a "TOP3000", and ingredients must share a region.
+        universe_of = lambda r: (json.loads(r["settings"] or "{}").get("region", "USA"),
+                                 json.loads(r["settings"] or "{}").get("universe", "TOP3000"))
         pool = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
                 and abs(num(r["sharpe"])) >= floor
                 and set(filter(None, r["failed_checks"].split(";"))) <= ok_checks

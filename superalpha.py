@@ -92,25 +92,33 @@ def rewrite(rows):
     tmp.replace(SUPERS)
 
 
-def recipes(cfg, categories):
-    """Every recipe the bot may try: selections (incl. one per data category in your pool) x combos x settings."""
+def recipes(cfg, region_categories):
+    """Every recipe the bot may try, per eligible region: selections (incl. one per data category in that region's
+    pool) x combos x settings. A SuperAlpha only selects alphas of its own region and delay (BRAIN docs), so a
+    region qualifies once it has `super.min_region_alphas` (10) submitted alphas. USA keys have no region suffix."""
     sc = cfg.get("super", {})
-    sels = list(SELECTIONS) + [(f"cat_{c}", CATEGORY_SELECTION[0].format(cat=c), CATEGORY_SELECTION[1],
-                                f"{c} alphas least like the production pool") for c in sorted(categories)]
     out = []
-    for skey, sel, handling, _ in sels:
-        for ckey, combo in COMBOS:
-            for neut in sc.get("neutralizations", ["STATISTICAL", "MARKET"]):
-                for decay in sc.get("decays", [2, 4]):
-                    for limit in sc.get("limits", [10, 20, 30]):
-                        settings = {**BASE, "neutralization": neut, "decay": decay,
-                                    "selectionHandling": handling, "selectionLimit": limit}
-                        key = f"{skey}|{ckey}|{neut}|d{decay}|n{limit}"
-                        out.append({"recipe": key, "selection": sel, "combo": combo, "settings": settings})
+    for region, categories in region_categories.items():
+        prof = cfg.get("regions", {}).get(region, {})
+        sels = list(SELECTIONS) + [(f"cat_{c}", CATEGORY_SELECTION[0].format(cat=c), CATEGORY_SELECTION[1],
+                                    f"{c} alphas least like the production pool") for c in sorted(categories)]
+        for skey, sel, handling, _ in sels:
+            for ckey, combo in COMBOS:
+                for neut in sc.get("neutralizations", ["STATISTICAL", "MARKET"]):
+                    for decay in sc.get("decays", [2, 4]):
+                        for limit in sc.get("limits", [10, 20, 30]):
+                            settings = {**BASE, "neutralization": neut, "decay": decay,
+                                        "selectionHandling": handling, "selectionLimit": limit}
+                            if region != "USA":
+                                settings.update(region=region, universe=prof.get("universe", BASE["universe"]))
+                                if prof.get("maxTrade"):
+                                    settings["maxTrade"] = prof["maxTrade"]
+                            key = f"{skey}|{ckey}|{neut}|d{decay}|n{limit}" + ("" if region == "USA" else f"|{region}")
+                            out.append({"recipe": key, "selection": sel, "combo": combo, "settings": settings})
     return out
 
 
-def plan(cfg, categories, n):
+def plan(cfg, region_categories, n):
     """Pick `n` untried recipes. Each recipe part (selection, combo, neutralisation, decay, size) is scored by the
     best Sharpe it has reached so far plus an exploration bonus for parts with few tries, so the bot moves towards
     what works for this pool without stopping to explore."""
@@ -131,12 +139,12 @@ def plan(cfg, categories, n):
             v = stats.get(part, [])
             s += (max(v) if v else 1.2) + 0.6 / (1 + len(v)) ** 0.5 + random.random() * 0.2
         return s
-    todo = [r for r in recipes(cfg, categories) if r["recipe"] not in done]
+    todo = [r for r in recipes(cfg, region_categories) if r["recipe"] not in done]
     todo.sort(key=score, reverse=True)
     # At most one recipe per selection in a round, so each round explores different component sets.
     out, seen = [], set()
     for r in todo:
-        skey = r["recipe"].split("|")[0]
+        skey = (r["recipe"].split("|")[0], r["settings"].get("region", "USA"))
         if skey in seen:
             continue
         seen.add(skey)
