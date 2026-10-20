@@ -354,6 +354,54 @@ class Brain:
             raise BrainError(result.get("message") or f"status {result.get('status')}")
         return self.alpha(result["alpha"])
 
+    def simulate_many(self, items):
+        """Simulate up to 10 regular alphas of one region in one BRAIN multi-simulation (the account's
+        MULTI_SIMULATION permission): they share one simulation slot, so a 4-hour session tests several times
+        more ideas. `items` is [(expression, settings)]. Returns, in order, each alpha record or the
+        BrainError saying why that one failed. Tested 2026-10-20: 2 alphas in 180 s; regions can't be mixed."""
+        def one_by_one():
+            out = []
+            for expression, settings in items:
+                try:
+                    out.append(self.simulate(expression, settings))
+                except (BrainLoginBlocked, BrainBusy):
+                    raise
+                except BrainError as e:
+                    out.append(e)
+            return out
+
+        if len(items) == 1:
+            return one_by_one()
+        payload = [{"type": "REGULAR", "settings": s, "regular": e} for e, s in items]
+        r = self.request("POST", "/simulations", json=payload)
+        self.rate_limit = {k: r.headers.get(k) for k in ("X-Ratelimit-Limit", "X-Ratelimit-Remaining")}
+        if r.status_code == 400:
+            return one_by_one()  # one invalid idea rejects the whole batch: run them singly, only it fails
+        if r.status_code != 201:
+            raise BrainError(f"Multi-simulation rejected ({r.status_code}): {r.text[:300]}")
+        result = self._wait(r.headers["Location"], max_seconds=40 * 60, on_timeout=BrainStuck).json()
+        children = result.get("children") or []
+        if len(children) != len(items):
+            raise BrainError(f"multi-simulation gave {len(children)} results for {len(items)} ideas: "
+                             f"{result.get('message') or result.get('status')}")
+        out = []
+        for child in children:
+            try:
+                c = self._wait(f"/simulations/{child}", max_seconds=10 * 60, on_timeout=BrainStuck).json()
+                out.append(self.alpha(c["alpha"]) if "alpha" in c
+                           else BrainError(c.get("message") or f"status {c.get('status')}"))
+            except (BrainLoginBlocked, BrainBusy):
+                raise
+            except BrainError as e:
+                out.append(e)
+        # One invalid idea (e.g. an unknown field) makes BRAIN cancel the rest of the batch (tested
+        # 2026-10-20): run the cancelled ones again without it.
+        cancelled = [i for i, o in enumerate(out) if isinstance(o, BrainError) and str(o) == "status CANCELLED"]
+        if cancelled and len(cancelled) < len(items):
+            for i, o in zip(cancelled, self.simulate_many([items[i] for i in cancelled])):
+                out[i] = o
+        return out
+
     def simulate_super(self, selection, combo, settings):
         """Simulate a SuperAlpha (a weighted combination of your submitted alphas) and return its record.
         SuperAlphas are slower than regular alphas, so the wait is longer (60 minutes)."""

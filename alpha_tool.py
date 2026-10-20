@@ -970,27 +970,45 @@ def simulate_jobs(jobs, cfg, cycle):
             return
     client = brain()
     lock = threading.Lock()
+    # Multi-simulation: up to 10 ideas of one region share one BRAIN slot (one region per batch).
+    size = max(1, min(10, int(cfg.get("multi_simulation", 1))))
+    by_region = {}
+    for job in jobs:
+        s = {**cfg["settings"], **job["settings"]}
+        by_region.setdefault((s.get("region", "USA"), s.get("delay", 1)), []).append(job)
+    batches = [group[i:i + size] for group in by_region.values() for i in range(0, len(group), size)]
 
-    def run_one(job):
-        row = {**job, "cycle": cycle, "settings": json.dumps(job["settings"], sort_keys=True)}
+    def run_batch(batch):
+        items = [(job["expression"], {**cfg["settings"], **job["settings"]}) for job in batch]
         try:
-            row.update(summarize(client.simulate(job["expression"], {**cfg["settings"], **job["settings"]})))
+            results = client.simulate_many(items) if size > 1 else [client.simulate(*items[0])]
         except BrainLoginBlocked:
             raise  # not the alpha's fault and nothing else can run: stop the chunk, record nothing
         except BrainBusy as e:
-            # Not the alpha's fault: don't record it, so it is retried and not learned from.
-            row["error"] = "BRAIN busy, will retry next cycle: " + str(e)[:200]
-            return row
+            results = [e] * len(batch)
         except BrainError as e:
-            row["error"] = str(e)[:300]
-        with lock:
-            append_csv(RESULTS, RESULT_COLUMNS, [row])
-        return row
+            results = [e] * len(batch)
+        rows = []
+        for job, res in zip(batch, results):
+            row = {**job, "cycle": cycle, "settings": json.dumps(job["settings"], sort_keys=True)}
+            if isinstance(res, BrainBusy):
+                # Not the alpha's fault: don't record it, so it is retried and not learned from.
+                row["error"] = "BRAIN busy, will retry next cycle: " + str(res)[:200]
+                rows.append(row)
+                continue
+            if isinstance(res, BrainError):
+                row["error"] = str(res)[:300]
+            else:
+                row.update(summarize(res))
+            with lock:
+                append_csv(RESULTS, RESULT_COLUMNS, [row])
+            rows.append(row)
+        return rows
 
     with ThreadPoolExecutor(max_workers=cfg["concurrent_simulations"]) as pool:
-        futures = [pool.submit(run_one, job) for job in jobs]
-        for i, fut in enumerate(as_completed(futures), 1):
-            row = fut.result()
+        futures = [pool.submit(run_batch, batch) for batch in batches]
+        finished = (row for fut in as_completed(futures) for row in fut.result())
+        for i, row in enumerate(finished, 1):
             safe_heartbeat(cfg)  # long batches must not delay the hourly "alive" message
             if row.get("error"):
                 status = "ERROR " + row["error"][:80]

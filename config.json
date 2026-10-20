@@ -51,7 +51,7 @@
   },
   "fields": [],
   "min_field_coverage": 0.5,
-  "new_alphas_per_cycle": 20,
+  "new_alphas_per_cycle": 40,
   "repairs_per_cycle": 50,
   "repairs_per_alpha": 3,
   "max_repair_depth": 2,
@@ -99,6 +99,7 @@
     "min_last_year_sharpe": 0.5
   },
   "concurrent_simulations": 3,
+  "multi_simulation": 10,
   "corr_repairs_per_alpha": 3,
   "max_corr_repair_depth": 2,
   "combos_per_cycle": 40,
