@@ -402,6 +402,14 @@ class Brain:
                 out[i] = o
         return out
 
+    def prod_corr(self, alpha_id):
+        """Highest correlation of the alpha with all alphas in BRAIN's production pool (the consultant
+        PROD_CORRELATION test, limit 0.7). About 5-8 s per alpha (2026-10-20); None if BRAIN gives none."""
+        r = self._wait(f"/alphas/{alpha_id}/correlations/prod", max_seconds=180)
+        if r.status_code != 200 or not r.text:
+            raise BrainError(f"production correlation of {alpha_id}: {r.status_code} {r.text[:120]}")
+        return r.json().get("max")
+
     def simulate_super(self, selection, combo, settings):
         """Simulate a SuperAlpha (a weighted combination of your submitted alphas) and return its record.
         SuperAlphas are slower than regular alphas, so the wait is longer (60 minutes)."""

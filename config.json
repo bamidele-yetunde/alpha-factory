@@ -51,7 +51,7 @@
   },
   "fields": [],
   "min_field_coverage": 0.5,
-  "new_alphas_per_cycle": 40,
+  "new_alphas_per_cycle": 60,
   "repairs_per_cycle": 50,
   "repairs_per_alpha": 3,
   "max_repair_depth": 2,
@@ -98,8 +98,10 @@
     "min_year_sharpe": -0.5,
     "min_last_year_sharpe": 0.5
   },
-  "concurrent_simulations": 3,
+  "concurrent_simulations": 6,
   "multi_simulation": 10,
+  "prod_corr_per_round": 24,
+  "prod_corr_min_sharpe": 1.0,
   "corr_repairs_per_alpha": 3,
   "max_corr_repair_depth": 2,
   "combos_per_cycle": 40,
@@ -290,6 +292,6 @@
   },
   "dataset_batch": 60,
   "alpha_daily_quota": 4,
-  "power_pool_daily_quota": 2,
+  "power_pool_daily_quota": 4,
   "auto_submit": true
 }

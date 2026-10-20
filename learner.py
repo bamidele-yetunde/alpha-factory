@@ -164,18 +164,31 @@ def novelty_factor(row):
     return max(0.2, min(1.0, 1 - (num(mc) - 0.5) * 4))
 
 
+REGULAR_SHARPE = 1.58  # consultant bar (was 1.25 before 18 Oct 2026); fitness bar 1.0
+
+
+def prod_factor(row):
+    """BRAIN's production correlation (limit 0.7) blocked every strong consultant alpha until 20 Oct:
+    1 at 0.6 or below, 0.6 at 0.7, 0.2 from 0.8. Not measured: 1 below Sharpe 1.0 (never measured), else 0.7."""
+    pc = row.get("prod_corr")
+    if pc is None:
+        return 1.0 if abs(num(row.get("sharpe"))) < 1.0 else 0.7
+    return max(0.2, min(1.0, 1 - (num(pc) - 0.6) * 4))
+
+
 def reward(row):
-    """1 for a verified pass, 0.6 for an unverified one, 0.15 for one that failed the
-    correlation/robustness gate, otherwise up to 0.6 for how close Sharpe and fitness got.
-    Anything short of a verified pass is scaled down when its bet copies a submission."""
+    """1 for a verified regular pass, 0.7 for a Power Pool pass, up to 0.6 for an unverified one by how close
+    it is to the regular bar, 0.15 for one that failed the correlation/robustness gate, otherwise up to 0.6
+    for how close Sharpe (1.58) and fitness (1.0) got. Short of a verified pass, scaled down when its bet
+    copies a submission (novelty) or the production pool (prod_factor)."""
     if row["passed"] == "True":
-        return 1.0
+        return 0.7 if row.get("power_pool") else 1.0
+    closeness = max(0.0, min(1.0, abs(num(row["sharpe"])) / REGULAR_SHARPE, abs(num(row["fitness"])) / 1.0))
     if row["passed"] == "Pending":
-        return 0.6 * novelty_factor(row)
+        return 0.6 * max(0.3, closeness) * novelty_factor(row) * prod_factor(row)
     if set(row["failed_checks"].split(";")) & GATE_CHECKS:
-        return 0.15
-    closeness = min(abs(num(row["sharpe"])) / 1.25, abs(num(row["fitness"])) / 1.0)
-    return 0.6 * max(0.0, min(1.0, closeness)) * novelty_factor(row)
+        return 0.15 * prod_factor(row)
+    return 0.6 * closeness * novelty_factor(row) * prod_factor(row)
 
 
 def components(row):
@@ -220,7 +233,7 @@ def apply_repair(kind, expr, overrides, base):
 
 
 class Knowledge:
-    def __init__(self, rows, submissions, cfg, checks=(), submitted_alphas=(), novelty=None):
+    def __init__(self, rows, submissions, cfg, checks=(), submitted_alphas=(), novelty=None, prod_corr=None):
         self.cfg = cfg
         self.field_kind = {}  # field id -> MATRIX / VECTOR (filled from fields.csv when planning)
         self.novelty = novelty or {}
@@ -246,6 +259,8 @@ class Knowledge:
                 mc = num(check["self_corr"], mc)
             if mc is not None:
                 r["max_corr"] = mc
+            if (prod_corr or {}).get(r["alpha_id"]) is not None:
+                r["prod_corr"] = prod_corr[r["alpha_id"]]
         self.rows = rows
         self.sims = [r for r in rows if r["alpha_id"]]
         by_id = {r["alpha_id"]: r for r in self.sims}
@@ -359,6 +374,8 @@ class Knowledge:
         if (check is None or check["verdict"] == "RETRY" or before_rules
                 or ((check["verdict"] == "PASS" or risky_only) and self.check_is_stale(row, check))):
             row["passed"] = "Pending"
+        elif check["verdict"] == "PASS" and "POWER_POOL" in (check.get("detail") or ""):
+            row["power_pool"] = True  # passes only as a Power Pool alpha
         elif risky_only:
             row["risky"] = check["detail"].replace("NOT_ROBUST ", "")
         elif check["verdict"] != "PASS":

@@ -52,6 +52,7 @@ IDEAS = HERE / "ideas.txt"
 NOTIFIED = HERE / "notified.json"
 OPERATORS = HERE / "operators.json"
 NOVELTY = HERE / "novelty.json"
+PRODCORR = HERE / "prodcorr.json"  # alpha id -> production correlation (BRAIN), see update_prod_corr
 
 RESULT_COLUMNS = ["cycle", "expression", "settings", "template", "field", "dataset", "window", "group",
                   "repair", "parent", "depth", "alpha_id", "passed", "sharpe", "fitness", "turnover",
@@ -212,9 +213,59 @@ def update_novelty(cfg, limit=None):
         f"({sum(v < 0.5 for v in known)} of {len(known)} scored so far make a clearly different bet, max corr < 0.5)")
 
 
+def load_prodcorr():
+    try:
+        return json.loads(PRODCORR.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prod_corr(values):
+    """Merge {alpha id: production correlation} into prodcorr.json."""
+    if values:
+        with _log_lock:
+            scores = load_prodcorr()
+            scores.update(values)
+            write_atomic(PRODCORR, json.dumps(scores))
+
+
+def update_prod_corr(cfg, limit=None):
+    """Production correlation of recent promising simulations (Sharpe >= `prod_corr_min_sharpe`), read from
+    BRAIN. Under the consultant rules this test blocked every strong regular alpha (e.g. E5Vlw7ZL, Sharpe
+    3.08, 0.80 > 0.7), and the learner only saw it at the final check. With it, the learner favours the
+    ideas, data and settings nobody else trades. `prod_corr_per_round` per call, 4 at a time (5-8 s each)."""
+    from brain import BrainBusy, BrainError
+    from learner import num
+    scores = load_prodcorr()
+    todo = [r["alpha_id"] for r in reversed(load_csv(RESULTS))
+            if r["alpha_id"] and not r["error"] and num(r["sharpe"]) >= cfg.get("prod_corr_min_sharpe", 1.0)
+            and r["alpha_id"] not in scores]
+    todo = list(dict.fromkeys(todo))[:limit or cfg.get("prod_corr_per_round", 40)]
+    if not todo:
+        return
+    client, got = brain(), {}
+
+    def one(alpha_id):
+        try:
+            return alpha_id, client.prod_corr(alpha_id)
+        except BrainBusy:
+            return alpha_id, "busy"
+        except BrainError:
+            return alpha_id, None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for alpha_id, value in pool.map(one, todo):
+            if value != "busy":
+                got[alpha_id] = value
+    save_prod_corr(got)
+    known = [v for v in load_prodcorr().values() if v is not None]
+    log(f"PROD CORR: measured {len(got)} more simulations against BRAIN's production alphas "
+        f"({sum(v < 0.7 for v in known)} of {len(known)} measured so far are below the 0.7 limit)")
+
+
 def knowledge(cfg):
     know = Knowledge(load_csv(RESULTS), load_csv(SUBMISSIONS), cfg, load_csv(CHECKS), load_csv(SUBMITTED),
-                     novelty=load_novelty())
+                     novelty=load_novelty(), prod_corr=load_prodcorr())
     # Exact correlations from daily profits (fetched lazily, only when a plan asks for them).
     subs = [s["id"] for s in load_csv(SUBMITTED)]
     know.corr_to_submitted = lambda alpha_id: pnl_book().max_corr(alpha_id, subs)[0]
@@ -812,6 +863,9 @@ def verify(alpha_id, cfg, brain_allowed=True):
         except Exception as e:
             log(f"DESCRIPTION for {alpha_id} failed before its check: {str(e)[:120]}")
     checks, correlated = brain().check(alpha_id)
+    prod = next((c.get("value") for c in checks if c["name"] == "PROD_CORRELATION" and c.get("value") is not None), None)
+    if prod is not None:
+        save_prod_corr({alpha_id: prod})
     decisive = [c for c in checks if c.get("result") == "FAIL"]
     if decisive:
         # A definite FAIL (e.g. OLD_SIMULATION, LOW_SHARPE) decides it even while correlation checks are pending.
@@ -1040,8 +1094,14 @@ def run_cycle(cfg, dry_run=False):
         requeue_power_pool(cfg)
         verify_pending(cfg)
         update_novelty(cfg)
-        # SuperAlphas first: they are the main target and carry more weight than regular alphas.
         from brain import BrainLoginBlocked
+        try:
+            update_prod_corr(cfg)
+        except BrainLoginBlocked:
+            raise
+        except Exception as e:  # a learning aid: never let it stop a cycle
+            log(f"PROD CORR: skipped this round ({str(e)[:120]})")
+        # SuperAlphas first: they are the main target and carry more weight than regular alphas.
         try:
             run_super_round(cfg)
         except BrainLoginBlocked:

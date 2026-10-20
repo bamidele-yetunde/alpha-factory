@@ -17,6 +17,7 @@ run_output.txt
 notified.json
 pnl_cache.json.gz
 novelty.json
+prodcorr.json
 brain_session.json
 brain_face_id.json
 supers.csv
