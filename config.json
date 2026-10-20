@@ -165,7 +165,7 @@
   "sweep_repair_min_sharpe": 0.8,
   "sweep_max_depth": 4,
   "sweep_seed_min_sharpe": 1.0,
-  "heartbeat_hours": 1,
+  "heartbeat_hours": 6,
   "robustness_mode": "block",
   "skip_repairs": [
     "neut_none",
@@ -288,5 +288,6 @@
     }
   },
   "dataset_batch": 60,
-  "alpha_daily_quota": 4
+  "alpha_daily_quota": 4,
+  "auto_submit": true
 }

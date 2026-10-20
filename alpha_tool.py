@@ -437,6 +437,73 @@ def resimulate_old(cfg, cycle):
         simulate_jobs(jobs, cfg, cycle)
 
 
+def auto_submit(ready, cfg):
+    """Submit verified alphas straight away (user, 2026-10-20: the account has a sign-in limit, so the bot,
+    already signed in, submits and only tells you what it submitted). For each alpha on the ready list
+    (SuperAlphas first), within today's quota (4 alphas + 1 SuperAlpha per BRAIN day): a fresh BRAIN
+    submission check must pass completely, then it is submitted, then BRAIN must show it as submitted (OS).
+    Each alpha gets at most one attempt per day; any problem is reported once."""
+    if not cfg.get("auto_submit"):
+        return
+    from brain import BrainBusy, BrainError
+    from notify import code, esc, telegram
+    today = brain_today()
+    subs = load_csv(SUBMITTED)
+    used = {"SUPER": 0, "REGULAR": 0}
+    for s in subs:
+        if (s.get("submitted_at") or "")[:10] == today:
+            used["SUPER" if s.get("type") == "SUPER" else "REGULAR"] += 1
+    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("alpha_daily_quota", 4)}
+    state = load_notified()
+    tried = state.get("submit_attempts", {})
+    submitted_any = False
+    for r in ready:
+        kind = "SUPER" if r.get("super") else "REGULAR"
+        aid = r["alpha_id"]
+        if used[kind] >= quota[kind] or tried.get(aid) == today:
+            continue
+        try:
+            checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
+        except BrainBusy:
+            log(f"AUTO-SUBMIT {aid}: BRAIN's check is slow; trying again next round")
+            continue
+        except BrainError as e:
+            log(f"AUTO-SUBMIT {aid}: check failed ({str(e)[:100]}); trying again next round")
+            continue
+        if any(c.get("result") == "PENDING" for c in checks):
+            log(f"AUTO-SUBMIT {aid}: BRAIN still computing some tests; trying again next round")
+            continue
+        tried[aid] = today
+        state["submit_attempts"] = tried
+        save_notified(state)
+        failed = [f"{c['name']} {c.get('value')} (limit {c.get('limit')})" for c in checks if c.get("result") == "FAIL"]
+        if failed:
+            log(f"AUTO-SUBMIT {aid}: not submitted, BRAIN's check now fails: {'; '.join(failed)}")
+            continue
+        try:
+            alpha = brain().submit(aid)
+        except BrainError as e:
+            log(f"AUTO-SUBMIT {aid}: BRAIN rejected the submission: {str(e)[:200]}")
+            telegram(f"⚠️ Could not submit {code(aid)}: {esc(str(e)[:150])}")
+            continue
+        if alpha.get("stage") == "OS":
+            used[kind] += 1
+            submitted_any = True
+            st = alpha.get("is") or {}
+            log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
+                f"today {used['REGULAR']}/{quota['REGULAR']} alphas, {used['SUPER']}/{quota['SUPER']} SuperAlphas")
+            telegram(f"📤 SUBMITTED {'SuperAlpha' if kind == 'SUPER' else 'alpha'} {code(aid)}\n"
+                     f"Sharpe {esc(st.get('sharpe'))} | Fitness {esc(st.get('fitness'))} | "
+                     f"Self-corr {esc(r.get('self_corr'))}\n"
+                     f"Today: {used['REGULAR']}/{quota['REGULAR']} alphas, {used['SUPER']}/{quota['SUPER']} SuperAlpha")
+        else:
+            bad = [f"{c['name']}" for c in (alpha.get("is") or {}).get("checks", []) if c.get("result") == "FAIL"]
+            log(f"AUTO-SUBMIT {aid}: BRAIN did not accept it (stage {alpha.get('stage')}; failing {bad})")
+            telegram(f"⚠️ BRAIN did not accept {code(aid)} (failing: {esc(', '.join(bad) or 'unknown')}).")
+    if submitted_any:
+        sync_submitted()
+
+
 def super_candidates():
     """Verified SuperAlphas not yet submitted, in the same shape as regular shortlist rows. Empty while today's
     SuperAlpha quota is used: BRAIN allows 1 SuperAlpha submission per day ("reached quota of 1", 2026-10-19)."""
@@ -504,7 +571,8 @@ def write_reports(cfg):
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}; basket now {len(ready)}) {r['expression']} {r['settings']}")
             risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
-            telegram("\n".join([
+            # With auto_submit the bot submits these itself and reports 📤 SUBMITTED, so no "new pass" alert.
+            (telegram if not cfg.get("auto_submit") else (lambda *a: None))("\n".join([
                 (f"\U0001F31F NEW SUPER ALPHA PASS: {code(r['alpha_id'])} (descriptions attached)" if r.get("super")
                  else f"✅ NEW PASS: {code(r['alpha_id'])}{risk} (description attached)"),
                 f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])} | Self-corr {esc(r['self_corr'])}",
@@ -527,7 +595,7 @@ def write_reports(cfg):
         else:
             reason = "no longer passes verification"
         log(f"READY TO SUBMIT: {alpha_id} removed ({reason})")
-        if reason != "submitted":
+        if reason != "submitted" and not cfg.get("auto_submit"):
             telegram(f"⚠️ {code(alpha_id)} removed from the ready list: {esc(reason)}. Don't submit it now.")
     if backups and set(backups) != set(json.loads(load_notified().get("backups_logged", "[]"))):
         log(f"BASKET: {len(ready)} alphas submittable together; {len(backups)} backups making the same bet as "
@@ -545,6 +613,8 @@ def write_reports(cfg):
                              r["self_corr"], check["yearly_sharpe"], check["checked_at"], r["expression"],
                              r["settings"], "SUPER" if r.get("super") else "REGULAR"])
     pnl_book().save()
+    if ready and cfg.get("auto_submit"):
+        auto_submit(ready, cfg)
     return know
 
 

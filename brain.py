@@ -431,5 +431,5 @@ class Brain:
         r = self.request("POST", f"/alphas/{alpha_id}/submit")
         if r.status_code not in (200, 201):
             raise BrainError(f"Submit rejected ({r.status_code}): {r.text[:300]}")
-        self._wait(f"{API}/alphas/{alpha_id}/submit")
+        self._wait(f"{API}/alphas/{alpha_id}/submit", max_seconds=15 * 60)
         return self.alpha(alpha_id)
