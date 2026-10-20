@@ -320,7 +320,8 @@ class Knowledge:
             if check and check["verdict"] in ("PASS", "FAIL"):
                 for f in fields_in(r["expression"]) - common:
                     corr[f][0] += 1
-                    corr[f][1] += "SELF_CORRELATION" in check["failed"]
+                    # Production correlation too (consultant test): forward_price_* failed it 51 of 53 times.
+                    corr[f][1] += "SELF_CORRELATION" in check["failed"] or "PROD_CORRELATION" in check["failed"]
         self.field_corr = dict(corr)
         self.burned_fields = {f for f, (n, k) in corr.items()
                               if n >= cfg.get("burn_after_checks", 4) and k / n >= cfg.get("burn_corr_rate", 0.8)}
