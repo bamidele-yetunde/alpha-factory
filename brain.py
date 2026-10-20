@@ -102,15 +102,21 @@ class Brain:
         if left > minutes_before * 60 or self._pending_face_id():
             return
         from notify import esc, telegram
+        # Renew while the current, face-ID-verified session is still valid: the new request carries that
+        # session's cookie. If BRAIN accepts it, sessions can be chained (4 h each, BRAIN's maximum) and face ID
+        # is only needed when the chain breaks. A copy of the cookies is used, so a refusal can't touch the
+        # session the bot is working with; if BRAIN refuses, its reply is the face ID link we send you anyway.
         s = requests.Session()
+        s.cookies.update(self.s.cookies)
         s.auth = load_credentials()
         try:
-            r = s.post(f"{API}/authentication", timeout=60)
+            r = s.post(f"{API}/authentication", json={"expiry": 14400}, timeout=60)
         except requests.RequestException:
             return
         if r.status_code in (200, 201):  # BRAIN didn't ask for face ID this time
             self.s.cookies.update(s.cookies)
-            self._finish_login("renewed, no face ID needed")
+            self.renewed_silently = True
+            self._finish_login("session renewed without face ID")
             return
         if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":
             url = urljoin(r.url, r.headers["Location"])
@@ -206,7 +212,7 @@ class Brain:
                     f"{(time.time() - pending['opened_at']) / 3600:.1f} h ago")
 
             self.s.auth = load_credentials()
-            r = self.s.post(f"{API}/authentication", timeout=60)
+            r = self.s.post(f"{API}/authentication", json={"expiry": 14400}, timeout=60)  # BRAIN's maximum: 4 h
             if r.status_code in (400, 429) and any(k in r.text for k in ("captcha", "BIOMETRICS")):
                 raise BrainLoginBlocked(f"Login blocked by BRAIN ({r.status_code}): {r.text[:200]}")
             if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":

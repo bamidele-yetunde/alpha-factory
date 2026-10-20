@@ -1203,11 +1203,20 @@ def heartbeat(cfg):
 
 
 def safe_heartbeat(cfg):
-    """Heartbeat from inside long loops; a Telegram or file problem must never stop the work."""
+    """Heartbeat from inside long loops; a Telegram or file problem must never stop the work. Also renews the
+    BRAIN session in time (cycles can run an hour, longer than the renewal window)."""
     try:
         heartbeat(cfg)
     except Exception as e:
         log(f"Heartbeat failed: {str(e)[:120]}")
+    try:
+        if _brain is not None:
+            _brain.renew_if_needed(minutes_before=40)
+            if getattr(_brain, "renewed_silently", False):
+                log("LOGIN: BRAIN renewed the session without a new face ID (sessions can be chained)")
+                _brain.renewed_silently = False
+    except Exception as e:
+        log(f"Session renewal check failed: {str(e)[:120]}")
 
 
 def watch_once(cfg):
@@ -1253,6 +1262,9 @@ def cmd_run_for(args):
             cfg = load_config()
             # Ask for a face ID renewal shortly before the 4-hour BRAIN session runs out (never blocks).
             brain().renew_if_needed()
+            if getattr(_brain, "renewed_silently", False):
+                log("LOGIN: BRAIN renewed the session without a new face ID (sessions can be chained)")
+                _brain.renewed_silently = False
             (run_sweep_cycle if cfg.get("mode") == "sweep" else run_cycle)(cfg)
             watch_once(cfg)
     except BrainLoginBlocked as e:
