@@ -54,3 +54,35 @@ def telegram(text):
             pass
         time.sleep(5 * (attempt + 1))
     return False
+
+
+OFFSET = Path(__file__).parent / "telegram_offset.json"
+
+
+def commands():
+    """Text messages you sent to the bot since the last call (e.g. "/login"), only from your own chat.
+    The read position is kept in telegram_offset.json so each message is handled once."""
+    token, chat = _settings()
+    if not (token and chat):
+        return []
+    try:
+        offset = json.loads(OFFSET.read_text(encoding="utf-8"))["offset"]
+    except (OSError, ValueError, KeyError):
+        offset = 0
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates",
+                         params={"offset": offset, "timeout": 0}, timeout=30)
+        updates = r.json().get("result", []) if r.ok else []
+    except (requests.RequestException, ValueError):
+        return []
+    texts = []
+    for u in updates:
+        offset = max(offset, u["update_id"] + 1)
+        m = u.get("message") or {}
+        if str((m.get("chat") or {}).get("id")) == str(chat) and m.get("text"):
+            texts.append(m["text"].strip())
+    if updates:
+        tmp = OFFSET.with_name(OFFSET.name + ".tmp")
+        tmp.write_text(json.dumps({"offset": offset}), encoding="utf-8")
+        os.replace(tmp, OFFSET)
+    return texts
