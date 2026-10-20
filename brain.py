@@ -317,12 +317,12 @@ class Brain:
             raise BrainError(f"Could not load alpha {alpha_id} ({r.status_code}): {r.text[:200]}")
         return r.json()
 
-    def check(self, alpha_id):
+    def check(self, alpha_id, max_seconds=90):
         """BRAIN's own pre-submission check, including self-correlation.
 
         Returns (checks, self_correlated) where self_correlated lists your most correlated alphas.
         """
-        r = self._wait(f"{API}/alphas/{alpha_id}/check", max_seconds=90)
+        r = self._wait(f"{API}/alphas/{alpha_id}/check", max_seconds=max_seconds)
         if r.status_code != 200:
             raise BrainError(f"Check failed for {alpha_id} ({r.status_code}): {r.text[:200]}")
         result = r.json()["is"]

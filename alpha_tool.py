@@ -377,7 +377,9 @@ def check_super(row, cfg):
     SuperAlpha stays CHECKING and is looked at again next round."""
     from brain import BrainBusy, BrainError
     try:
-        checks, _ = brain().check(row["alpha_id"])
+        # SuperAlpha correlation checks take much longer than 90 s: on 2026-10-19 ten candidates stayed
+        # "still computing" for hours with the regular 90-second wait.
+        checks, _ = brain().check(row["alpha_id"], max_seconds=cfg.get("super", {}).get("check_seconds", 600))
     except BrainBusy:
         checks = None
     except BrainError as e:
