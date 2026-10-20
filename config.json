@@ -289,5 +289,6 @@
   },
   "dataset_batch": 60,
   "alpha_daily_quota": 4,
+  "power_pool_daily_quota": 2,
   "auto_submit": true
 }

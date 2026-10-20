@@ -450,17 +450,14 @@ def auto_submit(ready, cfg):
     from brain import BrainBusy, BrainError
     from notify import code, esc, telegram
     today = brain_today()
-    subs = load_csv(SUBMITTED)
-    used = {"SUPER": 0, "REGULAR": 0}
-    for s in subs:
-        if (s.get("submitted_at") or "")[:10] == today:
-            used["SUPER" if s.get("type") == "SUPER" else "REGULAR"] += 1
-    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("alpha_daily_quota", 4)}
+    used = submitted_today()
+    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("alpha_daily_quota", 4),
+             "POWER_POOL": cfg.get("power_pool_daily_quota", 2)}
     state = load_notified()
     tried = state.get("submit_attempts", {})
     submitted_any = False
     for r in ready:
-        kind = "SUPER" if r.get("super") else "REGULAR"
+        kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
         if used[kind] >= quota[kind] or tried.get(aid) == today:
             continue
@@ -492,18 +489,59 @@ def auto_submit(ready, cfg):
             used[kind] += 1
             submitted_any = True
             st = alpha.get("is") or {}
+            counts = (f"{used['REGULAR']}/{quota['REGULAR']} alphas, {used['POWER_POOL']}/{quota['POWER_POOL']} "
+                      f"Power Pool, {used['SUPER']}/{quota['SUPER']} SuperAlpha")
             log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
-                f"today {used['REGULAR']}/{quota['REGULAR']} alphas, {used['SUPER']}/{quota['SUPER']} SuperAlphas")
-            telegram(f"📤 SUBMITTED {'SuperAlpha' if kind == 'SUPER' else 'alpha'} {code(aid)}\n"
+                f"today {counts}")
+            name = {"SUPER": "SuperAlpha", "POWER_POOL": "Power Pool alpha"}.get(kind, "alpha")
+            telegram(f"📤 SUBMITTED {name} {code(aid)}\n"
                      f"Sharpe {esc(st.get('sharpe'))} | Fitness {esc(st.get('fitness'))} | "
                      f"Self-corr {esc(r.get('self_corr'))}\n"
-                     f"Today: {used['REGULAR']}/{quota['REGULAR']} alphas, {used['SUPER']}/{quota['SUPER']} SuperAlpha")
+                     f"Today: {esc(counts)}")
         else:
             bad = [f"{c['name']}" for c in (alpha.get("is") or {}).get("checks", []) if c.get("result") == "FAIL"]
             log(f"AUTO-SUBMIT {aid}: BRAIN did not accept it (stage {alpha.get('stage')}; failing {bad})")
             telegram(f"⚠️ BRAIN did not accept {code(aid)} (failing: {esc(', '.join(bad) or 'unknown')}).")
     if submitted_any:
         sync_submitted()
+
+
+def requeue_power_pool(cfg):
+    """Once: alphas BRAIN failed only on the regular bar (Sharpe, fitness, production correlation, 2-year
+    Sharpe, IS ladder) were checked without a description, so their Power Pool route was never tested.
+    Mark them for a fresh check (now with the description first); 92 such alphas on 2026-10-20."""
+    state = load_notified()
+    if state.get("power_pool_requeued"):
+        return
+    from learner import num
+    latest = {}
+    for c in load_csv(CHECKS):
+        if c["verdict"] in ("PASS", "FAIL", "RETRY"):
+            latest[c["alpha_id"]] = c
+    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in load_csv(RESULTS) if r["alpha_id"]}
+    subs = {s["id"] for s in load_csv(SUBMITTED)}
+    now = datetime.now().isoformat(timespec="seconds")
+    again = [a for a, c in latest.items()
+             if c["verdict"] == "FAIL" and c["checked_at"] >= cfg.get("rules_since", "") and a not in subs
+             and set(c["failed"].split(";")) <= REGULAR_BAR and sharpe.get(a, 0) >= 1.0]
+    append_csv(CHECKS, CHECK_COLUMNS, [{"alpha_id": a, "checked_at": now, "verdict": "RETRY", "failed": "",
+                                        "self_corr": "", "corr_with": "", "yearly_sharpe": "",
+                                        "detail": "re-check as a Power Pool alpha (description first)"}
+                                       for a in again])
+    log(f"POWER POOL: {len(again)} alphas that failed only the regular bar queued for a fresh check "
+        "with their description attached (Power Pool route)")
+    state["power_pool_requeued"] = now
+    save_notified(state)
+
+
+def submitted_today():
+    """Submissions on today's BRAIN day by kind (SUPER, REGULAR, POWER_POOL), from submitted_alphas.csv."""
+    today = brain_today()
+    used = {"SUPER": 0, "REGULAR": 0, "POWER_POOL": 0}
+    for s in load_csv(SUBMITTED):
+        if (s.get("submitted_at") or "")[:10] == today:
+            used[s.get("type") if s.get("type") in used else "REGULAR"] += 1
+    return used
 
 
 def super_candidates():
@@ -535,15 +573,16 @@ def write_reports(cfg):
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
-    today = brain_today()
-    used = sum(1 for s in load_csv(SUBMITTED)
-               if s.get("type", "REGULAR") != "SUPER" and (s.get("submitted_at") or "")[:10] == today)
-    room = max(0, cfg.get("alpha_daily_quota", 4) - used)
-    regular = [r for r in ready if not r.get("super")]
-    if len(regular) > room:
-        held = {r["alpha_id"] for r in regular[room:]}
-        ready = [r for r in ready if r["alpha_id"] not in held]
-        backups.update({a: (0.0, "today's quota of 4 alphas") for a in held})
+    # Pure Power Pool alphas have their own quota (BRAIN, "Power Pool Alphas": graduated per day, then 1/day).
+    used = submitted_today()
+    for kind, key, default in (("REGULAR", "alpha_daily_quota", 4), ("POWER_POOL", "power_pool_daily_quota", 2)):
+        room = max(0, cfg.get(key, default) - used[kind])
+        same = [r for r in ready if alpha_kind(r, know.checks) == kind]
+        if len(same) > room:
+            held = {r["alpha_id"] for r in same[room:]}
+            ready = [r for r in ready if r["alpha_id"] not in held]
+            backups.update({a: (0.0, f"today's quota of {cfg.get(key, default)} "
+                                     f"{'Power Pool ' if kind == 'POWER_POOL' else ''}alphas") for a in held})
     super_ids = {r["alpha_id"] for r in supers}
     if failing.keys() & super_ids:
         import superalpha as SA
@@ -613,11 +652,21 @@ def write_reports(cfg):
             check = know.checks.get(r["alpha_id"]) or {"yearly_sharpe": "", "checked_at": r.get("checked_at", "")}
             writer.writerow([r["alpha_id"], n, "yes", r["risky"], r["sharpe"], r["fitness"], r["turnover"],
                              r["self_corr"], check["yearly_sharpe"], check["checked_at"], r["expression"],
-                             r["settings"], "SUPER" if r.get("super") else "REGULAR"])
+                             r["settings"], alpha_kind(r, know.checks)])
     pnl_book().save()
     if ready and cfg.get("auto_submit"):
+        for r in ready:
+            r["kind"] = alpha_kind(r, know.checks)
         auto_submit(ready, cfg)
     return know
+
+
+def submission_type(a):
+    """SUPER, POWER_POOL (a pure Power Pool alpha: Power Pool but not a Regular Alpha) or REGULAR."""
+    if a.get("type") == "SUPER":
+        return "SUPER"
+    names = {c.get("name") for c in a.get("classifications") or []}
+    return "POWER_POOL" if "Power Pool Alpha" in names and "Regular Alpha" not in names else a.get("type", "REGULAR")
 
 
 def sync_submitted():
@@ -642,7 +691,7 @@ def sync_submitted():
                              "universe": s.get("universe"), "decay": s.get("decay"),
                              "neutralization": s.get("neutralization"),
                              "submitted_at": a.get("dateSubmitted") or "",
-                             "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": a.get("type", ""),
+                             "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": submission_type(a),
                              "region": s.get("region", "USA")})
 
 
@@ -705,6 +754,18 @@ def robustness(alpha_id, cfg):
     return sharpes, problems
 
 
+POWER_POOL_TAG = "POWER_POOL"
+# Regular-alpha tests that only warn (not fail) for a Power Pool alpha with its description attached.
+REGULAR_BAR = {"LOW_SHARPE", "LOW_FITNESS", "PROD_CORRELATION", "LOW_2Y_SHARPE", "IS_LADDER_SHARPE"}
+
+
+def alpha_kind(r, checks):
+    """SUPER, POWER_POOL (passes BRAIN's check only as a Power Pool alpha) or REGULAR, for quotas."""
+    if r.get("super"):
+        return "SUPER"
+    return "POWER_POOL" if POWER_POOL_TAG in (checks.get(r["alpha_id"]) or {}).get("detail", "") else "REGULAR"
+
+
 def verify(alpha_id, cfg, brain_allowed=True):
     """Self-correlation (exact, from daily profits) and robustness first; BRAIN's own submission
     check only for alphas that pass both, since BRAIN's check is slow (often minutes).
@@ -736,10 +797,20 @@ def verify(alpha_id, cfg, brain_allowed=True):
             and earlier[-1]["checked_at"] >= cfg.get("rules_since", "")):  # only a pass under today's rules
         return {"alpha_id": alpha_id, "checked_at": now, "verdict": "PASS", "failed": "",
                 "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
-                "detail": "re-confirmed by exact PnL check against all submissions"}
+                "detail": "re-confirmed by exact PnL check against all submissions"
+                          + (f"; {POWER_POOL_TAG}" if POWER_POOL_TAG in earlier[-1]["detail"] else "")}
 
     if not brain_allowed:
         return "WAIT"
+    # Description first: with it, a consultant alpha below the regular bar (Sharpe 1.0-1.58, production
+    # correlation over 0.7) can still qualify as a Power Pool alpha. Without it BRAIN calls those tests FAIL,
+    # with it WARNING (zqrYXNRR, 2026-10-20). BRAIN's check then decides which kind it is, if any.
+    row = next((r for r in load_csv(RESULTS) if r["alpha_id"] == alpha_id), None)
+    if row:
+        try:
+            describe_regular(alpha_id, row["expression"], row["settings"])
+        except Exception as e:
+            log(f"DESCRIPTION for {alpha_id} failed before its check: {str(e)[:120]}")
     checks, correlated = brain().check(alpha_id)
     decisive = [c for c in checks if c.get("result") == "FAIL"]
     if decisive:
@@ -761,6 +832,10 @@ def verify(alpha_id, cfg, brain_allowed=True):
     if problems:
         failed.append("NOT_ROBUST")
         details.append("NOT_ROBUST " + ", ".join(problems))
+    # Passing with regular tests only at WARNING means a pure Power Pool alpha (its own daily quota).
+    below = [c["name"] for c in checks if c.get("result") == "WARNING" and c["name"] in REGULAR_BAR]
+    if below and not failed:
+        details.append(f"{POWER_POOL_TAG} (regular bar not met: {', '.join(below)})")
     return {"alpha_id": alpha_id, "checked_at": now,
             "verdict": "FAIL" if failed else "PASS", "failed": ";".join(failed),
             "self_corr": self_corr, "corr_with": top.get("id", ""),
@@ -944,6 +1019,7 @@ def run_cycle(cfg, dry_run=False):
     cycle = max((int(r["cycle"] or 0) for r in rows), default=0) + 1
     if not dry_run:
         sync_submitted()
+        requeue_power_pool(cfg)
         verify_pending(cfg)
         update_novelty(cfg)
         # SuperAlphas first: they are the main target and carry more weight than regular alphas.
