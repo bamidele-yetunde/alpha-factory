@@ -83,7 +83,9 @@ def log(message):
 def brain():
     global _brain
     if _brain is None:
+        import brain as brain_module
         from brain import Brain
+        brain_module.LOG = log  # renewal and login events go to activity_log.txt
         _brain = Brain()
     return _brain
 

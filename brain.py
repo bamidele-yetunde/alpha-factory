@@ -30,6 +30,7 @@ SESSION = HERE / "brain_session.json"
 PERSONA = HERE / "brain_face_id.json"   # the face ID check waiting for you, if any
 PERSONA_GAP_HOURS = 6                     # a pending check is looked at for at most this long
 NIGHT_END_HOUR = 6                        # no new face ID checks opened by the bot itself 00:00-06:00
+LOG = print                               # alpha_tool sets its log() here, so login events reach activity_log.txt
 
 
 class BrainStuck(BrainError):
@@ -112,8 +113,11 @@ class Brain:
         s.auth = load_credentials()
         try:
             r = s.post(f"{API}/authentication", json={"expiry": 14400}, timeout=60)
-        except requests.RequestException:
+        except requests.RequestException as e:
+            LOG(f"RENEW: renewal request failed ({e}); trying again next round")
             return
+        LOG(f"RENEW: session ends in {left / 60:.0f} min; BRAIN answered the renewal with {r.status_code} "
+            f"{r.headers.get('WWW-Authenticate', '')}".rstrip())
         if r.status_code in (200, 201):  # BRAIN didn't ask for face ID this time
             self.s.cookies.update(s.cookies)
             self.renewed_silently = True
@@ -134,6 +138,7 @@ class Brain:
         except requests.RequestException:
             return
         if r.status_code == 410:  # the renewal link expired unused: stop looking; the normal login takes over
+            LOG("RENEW: the renewal face ID link expired (410 Gone)")
             self._renewal = None
             self._mark_expired()
             return
@@ -173,6 +178,12 @@ class Brain:
             last = 0
         night = time.localtime().tm_hour < NIGHT_END_HOUR
         return not night and time.time() - last > 30 * 60
+
+    @staticmethod
+    def _expired_message():
+        # In the daytime the wait is only the 30-minute spacing between new checks (said "after 06:00" before).
+        when = "after 06:00" if time.localtime().tm_hour < NIGHT_END_HOUR else "within 30 minutes"
+        return f"face ID link expired; a fresh one comes {when}, or send /login to the Telegram bot for one now"
 
     @staticmethod
     def _mark_expired():
@@ -248,8 +259,7 @@ class Brain:
                 elif result == "EXPIRED":
                     if not self._may_open_face_id():
                         self._mark_expired()
-                        raise BrainLoginBlocked("face ID link expired; a fresh one comes after 06:00, or send "
-                                                "/login to the Telegram bot for one now")
+                        raise BrainLoginBlocked(self._expired_message())
                 else:
                     raise BrainLoginBlocked(
                         f"waiting for you to complete the face ID check sent on Telegram "
@@ -261,8 +271,7 @@ class Brain:
                 if any(c.lower().lstrip("/").startswith("login") for c in commands()):
                     requested = True
                 else:
-                    raise BrainLoginBlocked("face ID link expired; a fresh one comes after 06:00, or send "
-                                            "/login to the Telegram bot for one now")
+                    raise BrainLoginBlocked(self._expired_message())
 
             self.s.auth = load_credentials()
             r = self.s.post(f"{API}/authentication", json={"expiry": 14400}, timeout=60)  # BRAIN's maximum: 4 h
