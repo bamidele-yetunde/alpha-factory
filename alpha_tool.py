@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -1172,8 +1173,18 @@ def run_cycle(cfg, dry_run=False):
     if not dry_run:
         report_invalid_ideas(templates)
     field_ids, operators = known_names()
-    new = knowledge(cfg).propose(templates, load_fields(cfg), done_keys(), cfg["new_alphas_per_cycle"],
-                                 operators=operators, known_fields=field_ids)
+    # Half of the new ideas come from hypothesis-driven families (economic ratios, revisions, option
+    # volatility, short interest; fields chosen by meaning, in every region): template sweeps gave 0 regular
+    # alphas in 1,845 consultant-era simulations (2026-10-21).
+    n_new = cfg["new_alphas_per_cycle"]
+    n_family = round(n_new * cfg.get("family_share", 0.5))
+    know_now = knowledge(cfg)
+    new = know_now.propose(templates, load_fields(cfg), done_keys(), n_new - n_family,
+                           operators=operators, known_fields=field_ids)
+    if n_family:
+        import families
+        taken = done_keys() | {(j["expression"], json.dumps(j["settings"], sort_keys=True)) for j in new}
+        new += families.propose(know_now, load_csv(FIELDS), taken, n_family, cfg)
     if dry_run:
         print_jobs(f"Cycle {cycle} new ideas", new)
         print_jobs("Repairs waiting from earlier cycles", knowledge(cfg).plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg)))
@@ -1187,8 +1198,10 @@ def run_cycle(cfg, dry_run=False):
     if early and not past_deadline():
         simulate_jobs(early, cfg, cycle)
     explore = [j for j in new if j["repair"] == "explore"]
-    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(explore)} exploring a field new to its shape: "
-        f"{', '.join(sorted({j['dataset'] for j in explore})) or 'none left'})")
+    fam = [j for j in new if j["repair"] == "family"]
+    log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(fam)} from idea families, regions "
+        f"{dict(Counter(j['settings'].get('region', 'USA') for j in fam))}; {len(explore)} exploring a field new "
+        f"to its shape: {', '.join(sorted({j['dataset'] for j in explore})) or 'none left'})")
     if new and not past_deadline():
         simulate_jobs(new, cfg, cycle)
     if not past_deadline():
