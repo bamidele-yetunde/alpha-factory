@@ -261,6 +261,8 @@ class Knowledge:
                 r["max_corr"] = mc
             if (prod_corr or {}).get(r["alpha_id"]) is not None:
                 r["prod_corr"] = prod_corr[r["alpha_id"]]
+            elif check and "PROD_CORRELATION value=" in (check.get("detail") or ""):
+                r["prod_corr"] = num(check["detail"].split("PROD_CORRELATION value=")[1].split()[0], None)
         self.rows = rows
         self.sims = [r for r in rows if r["alpha_id"]]
         by_id = {r["alpha_id"]: r for r in self.sims}
@@ -345,6 +347,13 @@ class Knowledge:
         # How often each field already went into a combination: fresh ingredients get priority.
         self.combo_field_uses = Counter(f for r in unique if r["repair"] == "combine"
                                         for f in fields_in(r["expression"]) - common)
+
+    def crowded(self, r):
+        """Production correlation at or above `crowded_prod_corr` (0.85): variants of it inherit the
+        crowding (the field or settings barely move it: 0.87 on average for 91 alphas of one shape,
+        2026-10-20), so it is not repaired or combined."""
+        pc = r.get("prod_corr")
+        return pc is not None and num(pc) >= self.cfg.get("crowded_prod_corr", 0.85)
 
     def burned(self, expr):
         return bool(fields_in(expr) & self.burned_fields)
@@ -463,6 +472,13 @@ class Knowledge:
             n_explore = 0
         explored_in = Counter()
         out, seen = [], set(done)
+        # No shape may take more than `max_template_share` of a cycle: by 2026-10-20 one shape had a quarter
+        # of all simulations and averaged production correlation 0.87, whatever field went into it.
+        per_template = Counter()
+        template_cap = max(2, round(n * cfg.get("max_template_share", 0.15)))
+        # Each region gets its share of the ideas with a data slot (`region_share`): 81% had gone to USA,
+        # leaving 84,000 EUR/GLB/ASI fields almost untouched (223 simulations).
+        shares = {g: w for g, w in cfg.get("region_share", {}).items() if g == "USA" or g in cfg.get("regions", {})}
         for attempt in range(n * 50):
             if len(out) >= n:
                 break
@@ -472,14 +488,19 @@ class Knowledge:
             # An exploration idea needs a template with a data-field slot to put the new field in. Pick
             # among those only: by 2026-10-10 the learner preferred the research ideas (fields written
             # in) so strongly that it chose a slot template 0 times in 2000, and exploration stopped.
-            template = self.pick("template", allowed("template", slot_templates if explore else templates))
+            choices = [t for t in (slot_templates if explore else templates) if per_template[t] < template_cap]
+            if not choices:
+                break
+            template = self.pick("template", allowed("template", choices))
             names = placeholders(template)
+            want = (random.choices(list(shares), weights=list(shares.values()))[0]
+                    if shares and ({"field", "vfield"} & names) else None)
             row = {"template": template, "field": "", "dataset": "", "window": "", "group": ""}
             fill = {}
             only = fast if "swindow" in names else None
             if "field" in names or "vfield" in names:
                 kind, slot = ("MATRIX", "field") if "field" in names else ("VECTOR", "vfield")
-                fill[slot], row["dataset"] = pick_field(kind, explore=explore, only=only, template=template)
+                fill[slot], row["dataset"] = pick_field(kind, explore=explore, only=only, template=template, region=want)
                 row["field"] = fill[slot]
                 if not row["field"]:
                     continue
@@ -524,6 +545,7 @@ class Knowledge:
             if self.burned(expr):
                 continue  # a research idea that names a worn-out field directly
             seen.add(key)
+            per_template[template] += 1
             if explore:
                 explored_in[row["dataset"]] += 1
             per_field[row["field"]] += 1
@@ -609,7 +631,7 @@ class Knowledge:
         windows = {str(w) for w in cfg["search"]["windows"]}
         max_depth = cfg.get("sweep_max_depth", 4) if focus else cfg.get("max_corr_repair_depth", 2)
         candidates = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
-                      and (focus is None or r["alpha_id"] in focus)
+                      and (focus is None or r["alpha_id"] in focus) and not self.crowded(r)
                       and set(r["failed_checks"].split(";")) & GATE_CHECKS
                       and self.repairable_universe(r)
                       and (focus or not r["window"] or r["window"] in windows)
@@ -653,7 +675,7 @@ class Knowledge:
         # (region, universe): USA and GLB both have a "TOP3000", and ingredients must share a region.
         universe_of = lambda r: (json.loads(r["settings"] or "{}").get("region", "USA"),
                                  json.loads(r["settings"] or "{}").get("universe", "TOP3000"))
-        pool = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
+        pool = [r for r in self.sims if r["passed"] == "False" and not one_sided(r) and not self.crowded(r)
                 and abs(num(r["sharpe"])) >= floor
                 and set(filter(None, r["failed_checks"].split(";"))) <= ok_checks
                 and (not r["window"] or r["window"] in windows)
@@ -756,7 +778,7 @@ class Knowledge:
         max_depth = cfg.get("sweep_max_depth", 4) if focus else cfg["max_repair_depth"]
         min_sharpe = cfg.get("sweep_repair_min_sharpe", 0.8) if focus else cfg["repair_min_sharpe"]
         candidates = [r for r in self.sims if r["passed"] == "False" and not one_sided(r)
-                      and (focus is None or r["alpha_id"] in focus)
+                      and (focus is None or r["alpha_id"] in focus) and not self.crowded(r)
                       and not set(r["failed_checks"].split(";")) & GATE_CHECKS
                       and self.repairable_universe(r)
                       and not self.burned(r["expression"])

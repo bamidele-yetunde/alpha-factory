@@ -60,3 +60,19 @@ group_rank(ts_corr(ts_backfill({field}, 63), volume, {window}), {group})
 group_rank(vec_avg({vfield}) - last_diff_value(vec_avg({vfield}), 252), {group})
 -group_rank(days_from_last_change(vec_avg({vfield})), {group})
 group_rank(ts_std_dev(vec_avg({vfield}), 22) / (ts_std_dev(vec_avg({vfield}), {window}) + 0.0001), {group})
+
+# ---- Shapes against production correlation (2026-10-21) ----
+# Strong consultant alphas kept failing PROD_CORRELATION (0.80-0.99: too similar to alphas already in
+# production). These strip the common part most production alphas share (short-term reversal, size,
+# momentum, the price move itself) with regression_neut / vector_neut, or use other mechanics (scaling,
+# quantiles, volume-conditioned trading, covariance with returns). Each was simulated once on BRAIN first.
+regression_neut(group_rank(ts_delta(ts_backfill({field}, 63), {window}), {group}), group_rank(-ts_delta(close, 5), {group}))
+vector_neut(group_rank(ts_backfill({field}, 63) / cap, {group}), rank(cap))
+regression_neut(group_zscore(ts_backfill({field}, 63), {group}), group_zscore(ts_mean(returns, 252), {group}))
+group_rank(ts_regression(ts_backfill({field}, 63), returns, {window}), {group})
+hump(group_rank(ts_backfill({field}, 63), {group}), hump=0.01)
+group_rank(ts_scale(ts_backfill({field}, 63), {window}), {group})
+regression_neut(group_rank(ts_av_diff(ts_backfill({field}, 63), {window}), {group}), group_rank(ts_av_diff(close, {window}), {group}))
+trade_when(rank(volume / ts_mean(volume, 22)) > 0.7, group_rank(ts_delta(ts_backfill({field}, 63), {window}), {group}), -1)
+group_rank(ts_covariance(ts_backfill({field}, 63), returns, {window}), {group}) - group_rank(ts_std_dev(returns, {window}), {group})
+group_rank(ts_quantile(ts_backfill({field}, 63), {window}), {group})
