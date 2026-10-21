@@ -348,6 +348,37 @@ class Knowledge:
         self.combo_field_uses = Counter(f for r in unique if r["repair"] == "combine"
                                         for f in fields_in(r["expression"]) - common)
 
+    def region_weights(self):
+        """Share of new ideas per region, learned from results (user, 2026-10-21: use every region, but let
+        results decide). Each region's prior (`region_share`; `new_region_share` if not listed) is multiplied
+        by how often its recent simulations were promising (Sharpe >= 1.25 and production correlation not
+        known to be >= 0.75) relative to the average region, between x0.25 and x3. A region with fewer than
+        `region_probe_sims` recent simulations keeps at least its prior: every region gets a fair trial."""
+        cfg = self.cfg
+        regions = ["USA"] + list(cfg.get("regions", {}))
+        prior = cfg.get("region_share", {})
+        sims, good = Counter(), Counter()
+        for r in self.sims[-cfg.get("region_recent", 3000):]:
+            if r.get("template") == "SUPER":
+                continue
+            g = json.loads(r["settings"] or "{}").get("region", "USA")
+            sims[g] += 1
+            pc = r.get("prod_corr")
+            if num(r["sharpe"]) >= 1.25:
+                # Measured unique counts fully; not measured yet counts a third (most strong USA alphas turned
+                # out crowded once measured).
+                good[g] += 1 if pc is not None and num(pc) < 0.75 else (0.33 if pc is None else 0)
+        rate = {g: (good[g] + 1) / (sims[g] + 20) for g in regions}
+        avg = sum(rate.values()) / len(rate)
+        out = {}
+        for g in regions:
+            factor = min(2.0, max(0.25, rate[g] / avg))
+            if sims[g] < cfg.get("region_probe_sims", 60):
+                factor = max(factor, 1.0)
+            out[g] = round(prior.get(g, cfg.get("new_region_share", 0.06)) * factor, 4)
+        self.region_stats = {g: (sims[g], good[g]) for g in regions}
+        return out
+
     def unique(self, r):
         """Production correlation measured below `unique_prod_corr` (0.7): an idea nobody else trades yet."""
         pc = r.get("prod_corr")
@@ -528,7 +559,9 @@ class Knowledge:
         template_cap = max(2, round(n * cfg.get("max_template_share", 0.15)))
         # Each region gets its share of the ideas with a data slot (`region_share`): 81% had gone to USA,
         # leaving 84,000 EUR/GLB/ASI fields almost untouched (223 simulations).
-        shares = {g: w for g, w in cfg.get("region_share", {}).items() if g == "USA" or g in cfg.get("regions", {})}
+        # Only regions whose fields are downloaded (a new region's datasets arrive over a few runs).
+        have = {region_of(d) for _, d, _ in fields}
+        shares = {g: w for g, w in self.region_weights().items() if g in have}
         for attempt in range(n * 50):
             if len(out) >= n:
                 break
@@ -735,7 +768,8 @@ class Knowledge:
                 and (not r["window"] or r["window"] in windows)
                 and r["field"] not in self.submitted_fields
                 and not self.burned(r["expression"])  # worn-out families only give correlated combinations
-                and json.loads(r["settings"] or "{}").get("universe", "TOP3000") in combo_universes
+                and (json.loads(r["settings"] or "{}").get("universe", "TOP3000") in combo_universes
+                     or json.loads(r["settings"] or "{}").get("region", "USA") != "USA")
                 # Components already in enough verified passes would only make more of the same family.
                 and not any(self.component_passes[f] >= cfg["max_passes_per_field"]
                             for f in fields_in(r["expression"]))
@@ -812,7 +846,10 @@ class Knowledge:
         """`repair_universes` in config.json: only repair alphas simulated on these universes
         (all 14 verified passes up to 2026-10-07 were TOP3000; TOP1000/500/200 gave 0 in 364 sims)."""
         allowed = self.cfg.get("repair_universes")
-        universe = json.loads(r["settings"] or "{}").get("universe", self.cfg["settings"]["universe"])
+        settings = json.loads(r["settings"] or "{}")
+        if settings.get("region", "USA") != "USA":
+            return True  # other regions are simulated on their one configured universe
+        universe = settings.get("universe", self.cfg["settings"]["universe"])
         return not allowed or universe in allowed
 
     def plan_repairs(self, done, budget, fields=(), focus=None):

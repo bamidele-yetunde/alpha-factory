@@ -562,32 +562,43 @@ def auto_submit(ready, cfg):
         sync_submitted()
 
 
-def requeue_power_pool(cfg):
-    """Once: alphas BRAIN failed only on the regular bar (Sharpe, fitness, production correlation, 2-year
-    Sharpe, IS ladder) were checked without a description, so their Power Pool route was never tested.
-    Mark them for a fresh check (now with the description first); 92 such alphas on 2026-10-20."""
-    state = load_notified()
-    if state.get("power_pool_requeued"):
-        return
+def requeue_once(cfg):
+    """One-time re-checks after a rule change, each done once (flag in notified.json):
+    - power_pool_requeued (2026-10-20): alphas BRAIN failed only on the regular bar were checked without a
+      description, so their Power Pool route was never tested (92 alphas).
+    - unique_robust_requeued (2026-10-21, user): alphas our robustness rule blocked that are, or may be,
+      unique (production correlation < 0.7 or not measured yet): BRAIN's check now decides for unique ones."""
     from learner import num
+    state = load_notified()
     latest = {}
     for c in load_csv(CHECKS):
         if c["verdict"] in ("PASS", "FAIL", "RETRY"):
             latest[c["alpha_id"]] = c
-    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in recent if r["alpha_id"]}
+    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in load_csv(RESULTS) if r["alpha_id"]}
+    prod = load_prodcorr()
     subs = {s["id"] for s in load_csv(SUBMITTED)}
+    fails = {a: set(c["failed"].split(";")) for a, c in latest.items()
+             if c["verdict"] == "FAIL" and c["checked_at"] >= cfg.get("rules_since", "") and a not in subs}
+    rounds = [
+        ("power_pool_requeued", "re-check as a Power Pool alpha (description first)",
+         lambda a, f: f <= REGULAR_BAR and sharpe.get(a, 0) >= 1.0,
+         "POWER POOL: {n} alphas that failed only the regular bar queued for a fresh check with their description"),
+        ("unique_robust_requeued", "re-check: unique alphas are judged by BRAIN, not our robustness rule",
+         lambda a, f: "NOT_ROBUST" in f and f <= REGULAR_BAR | {"NOT_ROBUST"} and sharpe.get(a, 0) >= 1.2
+         and (prod.get(a) is None or prod[a] < cfg.get("unique_prod_corr", 0.7)),
+         "UNIQUE: {n} alphas blocked only by our robustness rule queued for a fresh check (BRAIN decides if unique)"),
+    ]
     now = datetime.now().isoformat(timespec="seconds")
-    again = [a for a, c in latest.items()
-             if c["verdict"] == "FAIL" and c["checked_at"] >= cfg.get("rules_since", "") and a not in subs
-             and set(c["failed"].split(";")) <= REGULAR_BAR and sharpe.get(a, 0) >= 1.0]
-    append_csv(CHECKS, CHECK_COLUMNS, [{"alpha_id": a, "checked_at": now, "verdict": "RETRY", "failed": "",
-                                        "self_corr": "", "corr_with": "", "yearly_sharpe": "",
-                                        "detail": "re-check as a Power Pool alpha (description first)"}
-                                       for a in again])
-    log(f"POWER POOL: {len(again)} alphas that failed only the regular bar queued for a fresh check "
-        "with their description attached (Power Pool route)")
-    state["power_pool_requeued"] = now
-    save_notified(state)
+    for flag, detail, wanted, message in rounds:
+        if state.get(flag):
+            continue
+        again = [a for a, f in fails.items() if wanted(a, f)]
+        append_csv(CHECKS, CHECK_COLUMNS, [{"alpha_id": a, "checked_at": now, "verdict": "RETRY", "failed": "",
+                                            "self_corr": "", "corr_with": "", "yearly_sharpe": "",
+                                            "detail": detail} for a in again])
+        log(message.format(n=len(again)))
+        state[flag] = now
+        save_notified(state)
 
 
 def submitted_today():
@@ -832,6 +843,21 @@ def verify(alpha_id, cfg, brain_allowed=True):
     now = datetime.now().isoformat(timespec="seconds")
     corr, closest, blocked = corr_screen(alpha_id, cfg)
     sharpes, problems = robustness(alpha_id, cfg)
+    # User, 2026-10-21: for unique alphas (production correlation < 0.7) BRAIN's check decides, not our
+    # robustness rule: it had blocked P0MZL6wW, the strongest unique alpha, before BRAIN ever saw it.
+    waived = ""
+    if problems and not blocked and cfg.get("unique_skips_robustness", True):
+        from brain import BrainError
+        pc = load_prodcorr().get(alpha_id)
+        if pc is None:
+            try:
+                pc = brain().prod_corr(alpha_id)
+                save_prod_corr({alpha_id: pc})
+            except BrainError:
+                pc = None
+        if pc is not None and pc < cfg.get("unique_prod_corr", 0.7):
+            waived = f"RISKY (unique, production correlation {pc}; our robustness rule waived: {', '.join(problems)})"
+            problems = []
     local = round(corr, 4) if corr is not None else ""
     failed, details = [], []
     if blocked:
@@ -895,6 +921,8 @@ def verify(alpha_id, cfg, brain_allowed=True):
     below = [c["name"] for c in checks if c.get("result") == "WARNING" and c["name"] in REGULAR_BAR]
     if below and not failed:
         details.append(f"{POWER_POOL_TAG} (regular bar not met: {', '.join(below)})")
+    if waived:
+        details.append(waived)
     return {"alpha_id": alpha_id, "checked_at": now,
             "verdict": "FAIL" if failed else "PASS", "failed": ";".join(failed),
             "self_corr": self_corr, "corr_with": top.get("id", ""),
@@ -1096,7 +1124,7 @@ def run_cycle(cfg, dry_run=False):
     cycle = max((int(r["cycle"] or 0) for r in rows), default=0) + 1
     if not dry_run:
         sync_submitted()
-        requeue_power_pool(cfg)
+        requeue_once(cfg)
         verify_pending(cfg)
         update_novelty(cfg)
         from brain import BrainLoginBlocked

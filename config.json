@@ -104,7 +104,19 @@
   "prod_corr_min_sharpe": 1.0,
   "crowded_prod_corr": 0.85,
   "max_template_share": 0.15,
-  "region_share": {"USA": 0.4, "EUR": 0.2, "GLB": 0.2, "ASI": 0.2},
+  "region_share": {
+    "USA": 0.25,
+    "EUR": 0.11,
+    "GLB": 0.11,
+    "ASI": 0.11,
+    "CHN": 0.06,
+    "KOR": 0.06,
+    "TWN": 0.06,
+    "AMR": 0.06,
+    "IND": 0.06,
+    "DEU": 0.06,
+    "GBR": 0.06
+  },
   "corr_repairs_per_alpha": 3,
   "max_corr_repair_depth": 2,
   "combos_per_cycle": 40,
@@ -291,10 +303,156 @@
         12
       ],
       "maxTrade": "ON"
+    },
+    "CHN": {
+      "universe": "TOP2000U",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
+    },
+    "KOR": {
+      "universe": "TOP600",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ],
+      "maxTrade": "ON"
+    },
+    "TWN": {
+      "universe": "TOP500",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ],
+      "maxTrade": "ON"
+    },
+    "AMR": {
+      "universe": "TOP600",
+      "neutralization": [
+        "COUNTRY",
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "MARKET"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector",
+        "country"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
+    },
+    "IND": {
+      "universe": "TOP500",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        7,
+        12,
+        20
+      ]
+    },
+    "DEU": {
+      "universe": "TOP500",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
+    },
+    "GBR": {
+      "universe": "TOP700",
+      "neutralization": [
+        "SUBINDUSTRY",
+        "INDUSTRY",
+        "SECTOR",
+        "MARKET",
+        "STATISTICAL"
+      ],
+      "groups": [
+        "subindustry",
+        "industry",
+        "sector"
+      ],
+      "decay": [
+        4,
+        7,
+        12
+      ]
     }
   },
-  "dataset_batch": 60,
+  "dataset_batch": 40,
   "alpha_daily_quota": 4,
   "power_pool_daily_quota": 4,
-  "auto_submit": true
+  "auto_submit": true,
+  "new_region_share": 0.06,
+  "region_probe_sims": 60,
+  "unique_prod_corr": 0.7,
+  "unique_skips_robustness": true
 }
