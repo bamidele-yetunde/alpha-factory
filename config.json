@@ -194,7 +194,7 @@
   "basket_corr_limit": 0.65,
   "combo_ingredient_max_corr": 0.7,
   "combo_predicted_corr_max": 0.65,
-  "verify_budget_minutes": 15,
+  "verify_budget_minutes": 6,
   "fast_datasets": [
     "news12",
     "news18",
