@@ -237,10 +237,15 @@ def update_prod_corr(cfg, limit=None):
     from brain import BrainBusy, BrainError
     from learner import num
     scores = load_prodcorr()
-    todo = [r["alpha_id"] for r in reversed(load_csv(RESULTS))
+    recent = load_csv(RESULTS)[-cfg.get("prod_corr_recent", 3000):]  # simulations under today's rules
+    todo = [r["alpha_id"] for r in reversed(recent)
             if r["alpha_id"] and not r["error"] and num(r["sharpe"]) >= cfg.get("prod_corr_min_sharpe", 1.0)
             and r["alpha_id"] not in scores]
-    todo = list(dict.fromkeys(todo))[:limit or cfg.get("prod_corr_per_round", 40)]
+    # Strongest first (then newest): a strong alpha's production correlation decides whether it is worth
+    # repairing; on 2026-10-21 most Sharpe 2+ near-misses had never been measured.
+    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in recent if r["alpha_id"]}
+    todo = list(dict.fromkeys(todo))
+    todo = sorted(todo, key=lambda a: -round(sharpe.get(a, 0), 1))[:limit or cfg.get("prod_corr_per_round", 40)]
     if not todo:
         return
     client, got = brain(), {}
@@ -569,7 +574,7 @@ def requeue_power_pool(cfg):
     for c in load_csv(CHECKS):
         if c["verdict"] in ("PASS", "FAIL", "RETRY"):
             latest[c["alpha_id"]] = c
-    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in load_csv(RESULTS) if r["alpha_id"]}
+    sharpe = {r["alpha_id"]: num(r["sharpe"]) for r in recent if r["alpha_id"]}
     subs = {s["id"] for s in load_csv(SUBMITTED)}
     now = datetime.now().isoformat(timespec="seconds")
     again = [a for a, c in latest.items()

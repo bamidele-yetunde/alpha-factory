@@ -348,6 +348,56 @@ class Knowledge:
         self.combo_field_uses = Counter(f for r in unique if r["repair"] == "combine"
                                         for f in fields_in(r["expression"]) - common)
 
+    def unique(self, r):
+        """Production correlation measured below `unique_prod_corr` (0.7): an idea nobody else trades yet."""
+        pc = r.get("prod_corr")
+        return pc is not None and num(pc) < self.cfg.get("unique_prod_corr", 0.7)
+
+    def plan_unique_repairs(self, seen, budget):
+        """Unique alphas (production correlation below 0.7) that are not yet strong enough for a regular
+        alpha come first: they are the most valuable starting points, since repairs of crowded alphas stay
+        crowded. By 2026-10-21 32 were found (best Sharpe 2.19, fitness 0.48) and none had been repaired:
+        the robustness gate, Power Pool passes and the depth limit all kept them out. Here only Sharpe
+        (>= `unique_min_sharpe` 1.0) and depth (< `unique_max_depth` 4) count; the repairs are the ones for
+        what is missing (Sharpe 1.58, fitness 1.0, sub-universe, 2-year Sharpe)."""
+        cfg, base = self.cfg, self.cfg["settings"]
+        bar = cfg.get("consultant_min_sharpe", REGULAR_SHARPE)
+        cands = [r for r in self.sims if self.unique(r) and not one_sided(r)
+                 and not (r["passed"] == "True" and not r.get("power_pool"))
+                 and num(r["sharpe"]) >= cfg.get("unique_min_sharpe", 1.0)
+                 and int(r["depth"] or 0) < cfg.get("unique_max_depth", 4)
+                 and self.children[r["alpha_id"]] < 2 * cfg["repairs_per_alpha"]]
+        cands.sort(key=lambda r: min(num(r["sharpe"]) / bar, num(r["fitness"])), reverse=True)
+        jobs = []
+        for r in cands:
+            sharpe, fitness = num(r["sharpe"]), num(r["fitness"])
+            if sharpe >= bar and fitness >= 1.0 and r["passed"] != "False":
+                continue  # already strong: it only needs its check
+            checks = (["LOW_SHARPE"] if sharpe < bar else []) + (["LOW_FITNESS"] if fitness < 1.0 else []) +                      [c for c in r["failed_checks"].split(";") if c in ("LOW_SUB_UNIVERSE_SHARPE", "LOW_2Y_SHARPE")]
+            kinds = self.rank_repairs(checks or ["LOW_SHARPE"])
+            if num(r["turnover"]) < 0.125:
+                kinds = ["decay_down"] + [k for k in kinds if k not in TURNOVER_CUTTERS]
+            overrides = json.loads(r["settings"] or "{}")
+            added = 0
+            for kind in kinds:
+                if added >= cfg["repairs_per_alpha"] or len(jobs) >= budget:
+                    break
+                result = apply_repair(kind, r["expression"], overrides, base)
+                if not result:
+                    continue
+                expr, settings = result
+                key = (expr, json.dumps(settings, sort_keys=True))
+                if key in seen or skeleton(expr) in self.submitted_shapes:
+                    continue
+                seen.add(key)
+                added += 1
+                jobs.append({**{k: r[k] for k in ("template", "field", "dataset", "window", "group")},
+                             "expression": expr, "settings": settings, "repair": kind,
+                             "parent": r["alpha_id"], "depth": int(r["depth"] or 0) + 1})
+            if len(jobs) >= budget:
+                break
+        return jobs
+
     def crowded(self, r):
         """Production correlation at or above `crowded_prod_corr` (0.85): variants of it inherit the
         crowding (the field or settings barely move it: 0.87 on average for 91 alphas of one shape,
@@ -675,9 +725,13 @@ class Knowledge:
         # (region, universe): USA and GLB both have a "TOP3000", and ingredients must share a region.
         universe_of = lambda r: (json.loads(r["settings"] or "{}").get("region", "USA"),
                                  json.loads(r["settings"] or "{}").get("universe", "TOP3000"))
-        pool = [r for r in self.sims if r["passed"] == "False" and not one_sided(r) and not self.crowded(r)
+        # Unique ingredients (production correlation < 0.7) may also be unverified or fail robustness: two of
+        # them at Sharpe ~1.4 can combine past 1.58 while staying unlike the production pool.
+        pool = [r for r in self.sims if not one_sided(r) and not self.crowded(r)
+                and (r["passed"] == "False" or (self.unique(r) and r["passed"] == "Pending"))
                 and abs(num(r["sharpe"])) >= floor
-                and set(filter(None, r["failed_checks"].split(";"))) <= ok_checks
+                and (set(filter(None, r["failed_checks"].split(";"))) <= ok_checks
+                     or (self.unique(r) and set(filter(None, r["failed_checks"].split(";"))) <= ok_checks | {"NOT_ROBUST", "LOW_2Y_SHARPE"}))
                 and (not r["window"] or r["window"] in windows)
                 and r["field"] not in self.submitted_fields
                 and not self.burned(r["expression"])  # worn-out families only give correlated combinations
@@ -691,7 +745,7 @@ class Knowledge:
         fatigue = cfg.get("combo_field_fatigue", 5)
         common = {"cap", "returns", "close", "volume"}
         uses = lambda r: max((self.combo_field_uses[f] for f in fields_in(r["expression"]) - common), default=0)
-        pool.sort(key=lambda r: abs(num(r["sharpe"])) / (1 + uses(r) / fatigue), reverse=True)
+        pool.sort(key=lambda r: (self.unique(r), abs(num(r["sharpe"])) / (1 + uses(r) / fatigue)), reverse=True)
         best = {}  # one per idea+field: repaired copies of the same alpha would only duplicate it
         for r in pool:
             best.setdefault((r["template"], r["field"]), r)
@@ -770,8 +824,10 @@ class Knowledge:
         for field_id, dataset, kind in fields:
             fields_by_dataset[dataset].append(field_id)
             self.field_kind[field_id] = kind
-        # Correlation repairs first: these alphas already pass every in-sample check.
-        jobs = self.plan_corr_repairs(seen, budget, fields_by_dataset, focus)
+        # Unique alphas first (nobody else trades them), then correlation repairs: those already pass every
+        # in-sample check.
+        jobs = [] if focus else self.plan_unique_repairs(seen, min(budget, cfg.get("unique_repairs_per_cycle", 15)))
+        jobs += self.plan_corr_repairs(seen, budget - len(jobs), fields_by_dataset, focus)
         if focus is None:
             jobs += self.plan_combos(seen, min(budget - len(jobs), cfg.get("combos_per_cycle", 12)))
         windows = {str(w) for w in cfg["search"]["windows"]}
@@ -783,7 +839,9 @@ class Knowledge:
                       and self.repairable_universe(r)
                       and not self.burned(r["expression"])
                       and (focus or not r["window"] or r["window"] in windows)  # skip retired windows
-                      and int(r["depth"] or 0) < max_depth
+                      # Sharpe 2+ alphas that only lack fitness (turnover too high) get two more levels:
+                      # by 2026-10-21 38 alphas had Sharpe >= 1.58 but fitness < 1, several stuck at depth 2.
+                      and int(r["depth"] or 0) < max_depth + (2 if abs(num(r["sharpe"])) >= 2.0 else 0)
                       and abs(num(r["sharpe"])) >= min_sharpe
                       and not self.children[r["alpha_id"]]]
         candidates.sort(key=lambda r: (reward(r), abs(num(r["sharpe"]))), reverse=True)  # strongest first
