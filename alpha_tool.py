@@ -67,6 +67,11 @@ SUBMITTED_COLUMNS = ["id", "code", "universe", "decay", "neutralization", "submi
 ACTIVITY_LOG = HERE / "activity_log.txt"
 
 _brain = None
+# End of the current GitHub work chunk (cmd_run_for): a cycle stops starting simulation batches after it, so
+# it ends with reports and submissions instead of being cut off by the 70-minute chunk limit. On 2026-10-21
+# no cycle finished for 10 hours (slow BRAIN checks, 7 new regions downloading).
+_deadline = None
+_last_verify = 0.0
 _book = None
 _log_lock = threading.Lock()
 
@@ -258,8 +263,14 @@ def update_prod_corr(cfg, limit=None):
         except BrainError:
             return alpha_id, None
 
+    import time
+    stop = time.time() + cfg.get("prod_corr_budget_seconds", 180)  # a slow BRAIN took 18 min for 0 (2026-10-21)
+
+    def timed(alpha_id):
+        return (alpha_id, "busy") if time.time() > stop else one(alpha_id)
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for alpha_id, value in pool.map(one, todo):
+        for alpha_id, value in pool.map(timed, todo):
             if value != "busy":
                 got[alpha_id] = value
     save_prod_corr(got)
@@ -1010,8 +1021,10 @@ def verify_pending(cfg, sync_each=False):
     passed_before = {c["alpha_id"] for c in load_csv(CHECKS) if c["verdict"] == "PASS"}
     order = {a: i for i, a in enumerate(pending)}
     pending.sort(key=lambda a: (a not in passed_before, -order[a]))
+    global _last_verify
+    import time
+    _last_verify = time.time()
     if pending:
-        import time
         log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness)")
         verify_and_record(pending, cfg, sync_each=sync_each, local_only=waiting,
                           deadline=time.time() + cfg.get("verify_budget_minutes", 15) * 60)
@@ -1040,6 +1053,11 @@ def summarize(alpha):
     }
 
 
+def past_deadline():
+    import time
+    return _deadline is not None and time.time() > _deadline
+
+
 def simulate_jobs(jobs, cfg, cycle):
     """Simulate jobs concurrently, appending each result to results.csv as soon as it finishes."""
     from brain import BrainBusy, BrainError, BrainLoginBlocked
@@ -1066,6 +1084,8 @@ def simulate_jobs(jobs, cfg, cycle):
     batches = [group[i:i + size] for group in by_region.values() for i in range(0, len(group), size)]
 
     def run_batch(batch):
+        if past_deadline():
+            return []  # not started before the chunk's end: planned again next cycle
         items = [(job["expression"], {**cfg["settings"], **job["settings"]}) for job in batch]
         try:
             results = client.simulate_many(items) if size > 1 else [client.simulate(*items[0])]
@@ -1125,7 +1145,9 @@ def run_cycle(cfg, dry_run=False):
     if not dry_run:
         sync_submitted()
         requeue_once(cfg)
-        verify_pending(cfg)
+        import time
+        if time.time() - _last_verify > 10 * 60:  # the chunk start (watch_once) has just verified
+            verify_pending(cfg)
         update_novelty(cfg)
         from brain import BrainLoginBlocked
         try:
@@ -1162,19 +1184,21 @@ def run_cycle(cfg, dry_run=False):
     early = k.plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg))
     log(f"=== Cycle {cycle}: simulating {len(early)} repairs waiting from earlier cycles"
         f" ({getattr(k, 'combo_skipped', 0)} combinations skipped: predicted too similar to your submissions)")
-    if early:
+    if early and not past_deadline():
         simulate_jobs(early, cfg, cycle)
     explore = [j for j in new if j["repair"] == "explore"]
     log(f"=== Cycle {cycle}: simulating {len(new)} new ideas ({len(explore)} exploring a field new to its shape: "
         f"{', '.join(sorted({j['dataset'] for j in explore})) or 'none left'})")
-    if new:
+    if new and not past_deadline():
         simulate_jobs(new, cfg, cycle)
-    verify_pending(cfg)
-    repairs = knowledge(cfg).plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg))
+    if not past_deadline():
+        verify_pending(cfg)
+    repairs = [] if past_deadline() else knowledge(cfg).plan_repairs(done_keys(), cfg["repairs_per_cycle"], load_fields(cfg))
     log(f"=== Cycle {cycle}: simulating {len(repairs)} repairs of this cycle's results")
     if repairs:
         simulate_jobs(repairs, cfg, cycle)
-    verify_pending(cfg)
+    if not past_deadline():
+        verify_pending(cfg)
     repairs = early + repairs
 
     update_novelty(cfg)
@@ -1517,6 +1541,9 @@ def cmd_run_for(args):
             log(f"LOGIN: new BRAIN session, valid for about {_brain.session_hours} h")
         discover_datasets(load_config())
         watch_once(load_config())
+        global _deadline
+        # Batches start until 5 min past the planned end; running ones finish well inside the 70-min cap.
+        _deadline = end + 5 * 60
         while time.time() < end:
             cfg = load_config()
             # Ask for a face ID renewal shortly before the 4-hour BRAIN session runs out (never blocks).

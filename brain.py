@@ -402,10 +402,11 @@ class Brain:
                 out[i] = o
         return out
 
-    def prod_corr(self, alpha_id):
+    def prod_corr(self, alpha_id, max_seconds=60):
         """Highest correlation of the alpha with all alphas in BRAIN's production pool (the consultant
-        PROD_CORRELATION test, limit 0.7). About 5-8 s per alpha (2026-10-20); None if BRAIN gives none."""
-        r = self._wait(f"/alphas/{alpha_id}/correlations/prod", max_seconds=180)
+        PROD_CORRELATION test, limit 0.7). About 5-8 s per alpha (2026-10-20), but minutes when BRAIN is busy
+        (2026-10-21): raises BrainBusy after `max_seconds`. None if BRAIN gives none."""
+        r = self._wait(f"/alphas/{alpha_id}/correlations/prod", max_seconds=max_seconds)
         if r.status_code != 200 or not r.text:
             raise BrainError(f"production correlation of {alpha_id}: {r.status_code} {r.text[:120]}")
         return r.json().get("max")
