@@ -247,7 +247,10 @@ class Knowledge:
         # on 2026-10-08 BRAIN errors hid 2 verified passes for hours (both were then submitted fine).
         self.checks = {}
         for c in checks:
-            if c["verdict"] != "RETRY" or self.checks.get(c["alpha_id"], {}).get("verdict") in (None, "RETRY"):
+            # A timed-out check (RETRY) doesn't undo an earlier verdict, but a deliberate re-check does
+            # (requeue_once: until 2026-10-22 those were ignored, so re-queued alphas stayed failed).
+            if (c["verdict"] != "RETRY" or c["detail"].startswith("re-check")
+                    or self.checks.get(c["alpha_id"], {}).get("verdict") in (None, "RETRY")):
                 self.checks[c["alpha_id"]] = c
         rows = [self._apply_check(r) for r in rows]
         # How different each alpha's bet is from your submissions (highest exact correlation), from

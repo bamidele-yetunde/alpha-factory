@@ -534,7 +534,7 @@ def auto_submit(ready, cfg):
         shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= quota["REGULAR"]
         if used[kind] >= quota[kind] or shared_full or tried.get(aid) == today:
             continue
-        if kind == "POWER_POOL" and regular_waiting:
+        if kind == "POWER_POOL" and (regular_waiting or not power_pool_window(cfg)):
             continue
         try:
             checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
@@ -628,6 +628,18 @@ def requeue_once(cfg):
         save_notified(state)
 
 
+def power_pool_window(cfg):
+    """User, 2026-10-22: regular alphas and SuperAlphas come first. A Power Pool alpha may only take a slot
+    BRAIN's day would otherwise waste: from `power_pool_after_hour_et` (20:00 US Eastern, 01:00 Lagos) on."""
+    try:
+        from zoneinfo import ZoneInfo
+        hour = datetime.now(ZoneInfo("America/New_York")).hour
+    except Exception:
+        from datetime import timedelta, timezone
+        hour = datetime.now(timezone(timedelta(hours=-4))).hour
+    return hour >= cfg.get("power_pool_after_hour_et", 20)
+
+
 def submitted_today():
     """Submissions on today's BRAIN day by kind (SUPER, REGULAR, POWER_POOL), from submitted_alphas.csv."""
     today = brain_today()
@@ -674,8 +686,8 @@ def write_reports(cfg):
     total = cfg.get("alpha_daily_quota", 4)
     regular_ready = [r for r in ready if alpha_kind(r, know.checks) == "REGULAR"]
     regular_room = max(0, total - used["REGULAR"] - used["POWER_POOL"])
-    pool_room = 0 if regular_ready else min(max(0, cfg.get("power_pool_daily_quota", 1) - used["POWER_POOL"]),
-                                            regular_room)
+    pool_room = 0 if regular_ready or not power_pool_window(cfg) else min(
+        max(0, cfg.get("power_pool_daily_quota", 1) - used["POWER_POOL"]), regular_room)
     for kind, room, key in (("REGULAR", regular_room, "alpha"), ("POWER_POOL", pool_room, "Power Pool")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
@@ -1015,6 +1027,7 @@ def verify_and_record(alpha_ids, cfg, sync_each=False, deadline=None, local_only
 
 def verify_pending(cfg, sync_each=False):
     """Verify every in-sample pass that has not been verified yet."""
+    from learner import num
     know = knowledge(cfg)
     pending = list(dict.fromkeys(r["alpha_id"] for r in know.sims  # an ID can appear in several rows
                                  if r["passed"] == "Pending" and r["alpha_id"] not in know.submitted))
@@ -1022,7 +1035,10 @@ def verify_pending(cfg, sync_each=False):
     # doubling up to 8 h. On 2026-10-07, 339 failed re-checks of 40 alphas took ~3 of 12 hours.
     streak, last_try = {}, {}
     for c in load_csv(CHECKS):
-        streak[c["alpha_id"]] = streak.get(c["alpha_id"], 0) + 1 if c["verdict"] == "RETRY" else 0
+        if c["verdict"] == "RETRY" and c["detail"].startswith("re-check"):
+            streak[c["alpha_id"]] = 0  # queued on purpose for a fresh check (requeue_once): no back-off
+        else:
+            streak[c["alpha_id"]] = streak.get(c["alpha_id"], 0) + 1 if c["verdict"] == "RETRY" else 0
         last_try[c["alpha_id"]] = c["checked_at"]
     now = datetime.now()
 
@@ -1044,7 +1060,9 @@ def verify_pending(cfg, sync_each=False):
     # then the newest in-sample passes. A time budget keeps a slow BRAIN from eating the whole cycle.
     passed_before = {c["alpha_id"] for c in load_csv(CHECKS) if c["verdict"] == "PASS"}
     order = {a: i for i, a in enumerate(pending)}
-    pending.sort(key=lambda a: (a not in passed_before, -order[a]))
+    # Strongest first (then newest): the strongest are the likeliest regular alphas (user, 2026-10-22).
+    sharpe = {r["alpha_id"]: abs(num(r["sharpe"])) for r in know.sims}
+    pending.sort(key=lambda a: (a not in passed_before, -round(sharpe.get(a, 0), 1), -order[a]))
     global _last_verify
     import time
     _last_verify = time.time()

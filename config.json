@@ -455,5 +455,6 @@
   "region_probe_sims": 60,
   "unique_prod_corr": 0.7,
   "unique_skips_robustness": true,
-  "family_share": 0.5
+  "family_share": 0.5,
+  "power_pool_after_hour_et": 20
 }
