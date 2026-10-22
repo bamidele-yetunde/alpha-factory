@@ -524,10 +524,17 @@ def auto_submit(ready, cfg):
     state = load_notified()
     tried = state.get("submit_attempts", {})
     submitted_any = False
+    # Regular and Power Pool share BRAIN's 4 a day: regular alphas first, Power Pool only if none is waiting.
+    order = {"SUPER": 0, "REGULAR": 1, "POWER_POOL": 2}
+    ready = sorted(ready, key=lambda r: order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 1))
+    regular_waiting = any((r.get("kind") or "REGULAR") == "REGULAR" and not r.get("super") for r in ready)
     for r in ready:
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
-        if used[kind] >= quota[kind] or tried.get(aid) == today:
+        shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= quota["REGULAR"]
+        if used[kind] >= quota[kind] or shared_full or tried.get(aid) == today:
+            continue
+        if kind == "POWER_POOL" and regular_waiting:
             continue
         try:
             checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
@@ -539,6 +546,10 @@ def auto_submit(ready, cfg):
             continue
         if any(c.get("result") == "PENDING" for c in checks):
             log(f"AUTO-SUBMIT {aid}: BRAIN still computing some tests; trying again next round")
+            continue
+        limit_hit = [c["name"] for c in checks if c.get("result") == "FAIL" and c["name"] in QUOTA_CHECKS]
+        if limit_hit:
+            log(f"AUTO-SUBMIT {aid}: BRAIN's daily limit is reached ({', '.join(limit_hit)}); it waits for tomorrow")
             continue
         tried[aid] = today
         state["submit_attempts"] = tried
@@ -599,6 +610,10 @@ def requeue_once(cfg):
          lambda a, f: "NOT_ROBUST" in f and f <= REGULAR_BAR | {"NOT_ROBUST"} and sharpe.get(a, 0) >= 1.2
          and (prod.get(a) is None or prod[a] < cfg.get("unique_prod_corr", 0.7)),
          "UNIQUE: {n} alphas blocked only by our robustness rule queued for a fresh check (BRAIN decides if unique)"),
+        ("quota_requeued", "re-check: it only hit BRAIN's daily submission limit, which says nothing about the alpha",
+         lambda a, f: f <= QUOTA_CHECKS | {"NOT_ROBUST"} and f & QUOTA_CHECKS,
+         "DAILY LIMIT: {n} alphas wrongly recorded as failures because BRAIN's daily limit was reached "
+         "(Sharpe up to 4.81) queued for a fresh check"),
     ]
     now = datetime.now().isoformat(timespec="seconds")
     for flag, detail, wanted, message in rounds:
@@ -652,16 +667,21 @@ def write_reports(cfg):
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
-    # Pure Power Pool alphas have their own quota (BRAIN, "Power Pool Alphas": graduated per day, then 1/day).
+    # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
+    # submissions blocked two Sharpe 3.5-4.8 regular alphas). Regular alphas first; Power Pool only takes what
+    # is left, at most `power_pool_daily_quota`, and only when no regular alpha is waiting.
     used = submitted_today()
-    for kind, key, default in (("REGULAR", "alpha_daily_quota", 4), ("POWER_POOL", "power_pool_daily_quota", 2)):
-        room = max(0, cfg.get(key, default) - used[kind])
+    total = cfg.get("alpha_daily_quota", 4)
+    regular_ready = [r for r in ready if alpha_kind(r, know.checks) == "REGULAR"]
+    regular_room = max(0, total - used["REGULAR"] - used["POWER_POOL"])
+    pool_room = 0 if regular_ready else min(max(0, cfg.get("power_pool_daily_quota", 1) - used["POWER_POOL"]),
+                                            regular_room)
+    for kind, room, key in (("REGULAR", regular_room, "alpha"), ("POWER_POOL", pool_room, "Power Pool")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
             held = {r["alpha_id"] for r in same[room:]}
             ready = [r for r in ready if r["alpha_id"] not in held]
-            backups.update({a: (0.0, f"today's quota of {cfg.get(key, default)} "
-                                     f"{'Power Pool ' if kind == 'POWER_POOL' else ''}alphas") for a in held})
+            backups.update({a: (0.0, f"today's quota of {key} alphas") for a in held})
     super_ids = {r["alpha_id"] for r in supers}
     if failing.keys() & super_ids:
         import superalpha as SA
@@ -834,6 +854,9 @@ def robustness(alpha_id, cfg):
 
 
 POWER_POOL_TAG = "POWER_POOL"
+# BRAIN's daily submission limits show up as FAILing tests (REGULAR_SUBMISSION value=4 limit=4). They say
+# nothing about the alpha: on 2026-10-21 53 alphas (Sharpe up to 4.81) were wrongly recorded as failures.
+QUOTA_CHECKS = {"REGULAR_SUBMISSION", "SUPER_SUBMISSION"}
 # Regular-alpha tests that only warn (not fail) for a Power Pool alpha with its description attached.
 REGULAR_BAR = {"LOW_SHARPE", "LOW_FITNESS", "PROD_CORRELATION", "LOW_2Y_SHARPE", "IS_LADDER_SHARPE"}
 
@@ -909,7 +932,7 @@ def verify(alpha_id, cfg, brain_allowed=True):
     prod = next((c.get("value") for c in checks if c["name"] == "PROD_CORRELATION" and c.get("value") is not None), None)
     if prod is not None:
         save_prod_corr({alpha_id: prod})
-    decisive = [c for c in checks if c.get("result") == "FAIL"]
+    decisive = [c for c in checks if c.get("result") == "FAIL" and c["name"] not in QUOTA_CHECKS]
     if decisive:
         # A definite FAIL (e.g. OLD_SIMULATION, LOW_SHARPE) decides it even while correlation checks are pending.
         return {"alpha_id": alpha_id, "checked_at": now, "verdict": "FAIL",
@@ -921,9 +944,9 @@ def verify(alpha_id, cfg, brain_allowed=True):
     self_check = next((c for c in checks if c["name"] == "SELF_CORRELATION"), None)
     if self_check is None or self_check.get("value") is None:
         return None  # no correlation value: not verified, retry later
-    failed = [c["name"] for c in checks if c.get("result") == "FAIL"]
+    failed = [c["name"] for c in checks if c.get("result") == "FAIL" and c["name"] not in QUOTA_CHECKS]
     details = [f"{c['name']} value={c.get('value')} limit={c.get('limit')}"
-               for c in checks if c.get("result") == "FAIL"]
+               for c in checks if c.get("result") == "FAIL" and c["name"] not in QUOTA_CHECKS]
     self_corr = self_check.get("value")
     top = max(correlated, key=lambda a: a.get("correlation") or -1, default={})
     if problems:
