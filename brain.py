@@ -457,6 +457,16 @@ class Brain:
         result = r.json()["is"]
         return result.get("checks", []), table(result.get("selfCorrelated"))
 
+    def start_checks(self, alpha_ids):
+        """Ask BRAIN to start its pre-submission checks for several alphas at once. BRAIN computes them in the
+        background, so a later check() only collects the result: on 2026-10-22 one check took over 4 minutes
+        and the bot was doing them one after another. Never waits."""
+        for alpha_id in alpha_ids:
+            try:
+                self.s.get(f"{API}/alphas/{alpha_id}/check", timeout=30)
+            except requests.RequestException:
+                pass
+
     def yearly_stats(self, alpha_id):
         r = self._wait(f"{API}/alphas/{alpha_id}/recordsets/yearly-stats", max_seconds=5 * 60)
         if r.status_code != 200:

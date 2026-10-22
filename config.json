@@ -206,7 +206,7 @@
   "basket_corr_limit": 0.65,
   "combo_ingredient_max_corr": 0.7,
   "combo_predicted_corr_max": 0.65,
-  "verify_budget_minutes": 6,
+  "verify_budget_minutes": 10,
   "fast_datasets": [
     "news12",
     "news18",
@@ -456,5 +456,7 @@
   "unique_prod_corr": 0.7,
   "unique_skips_robustness": true,
   "family_share": 0.5,
-  "power_pool_after_hour_et": 20
+  "power_pool_after_hour_et": 20,
+  "check_seconds": 180,
+  "prestart_checks": 15
 }

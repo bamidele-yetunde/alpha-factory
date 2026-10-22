@@ -940,7 +940,7 @@ def verify(alpha_id, cfg, brain_allowed=True):
             describe_regular(alpha_id, row["expression"], row["settings"])
         except Exception as e:
             log(f"DESCRIPTION for {alpha_id} failed before its check: {str(e)[:120]}")
-    checks, correlated = brain().check(alpha_id)
+    checks, correlated = brain().check(alpha_id, max_seconds=cfg.get("check_seconds", 180))
     prod = next((c.get("value") for c in checks if c["name"] == "PROD_CORRELATION" and c.get("value") is not None), None)
     if prod is not None:
         save_prod_corr({alpha_id: prod})
@@ -1067,6 +1067,8 @@ def verify_pending(cfg, sync_each=False):
     import time
     _last_verify = time.time()
     if pending:
+        # Start BRAIN's checks for the strongest ones together; the loop below then collects them.
+        brain().start_checks([a for a in pending if a not in waiting][:cfg.get("prestart_checks", 15)])
         log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness)")
         verify_and_record(pending, cfg, sync_each=sync_each, local_only=waiting,
                           deadline=time.time() + cfg.get("verify_budget_minutes", 15) * 60)
