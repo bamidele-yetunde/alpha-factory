@@ -1596,6 +1596,7 @@ def cmd_run_for(args):
         if getattr(_brain, "session_hours", None) is not None:
             log(f"LOGIN: new BRAIN session, valid for about {_brain.session_hours} h")
         discover_datasets(load_config())
+        requeue_once(load_config())  # before the first verification, so re-queued alphas are checked first
         watch_once(load_config())
         global _deadline
         # Batches start until 5 min past the planned end; running ones finish well inside the 70-min cap.
