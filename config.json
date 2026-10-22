@@ -449,14 +449,14 @@
   },
   "dataset_batch": 40,
   "alpha_daily_quota": 4,
-  "power_pool_daily_quota": 1,
+  "power_pool_daily_quota": 3,
   "auto_submit": true,
   "new_region_share": 0.06,
   "region_probe_sims": 60,
   "unique_prod_corr": 0.7,
   "unique_skips_robustness": true,
   "family_share": 0.5,
-  "power_pool_after_hour_et": 20,
+  "power_pool_after_hour_et": 0,
   "check_seconds": 180,
   "prestart_checks": 15
 }
