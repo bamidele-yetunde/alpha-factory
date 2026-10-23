@@ -531,16 +531,16 @@ def auto_submit(ready, cfg):
     tried = state.get("submit_attempts", {})
     submitted_any = False
     # Regular and Power Pool share BRAIN's 4 a day: regular alphas first, Power Pool only if none is waiting.
-    order = {"SUPER": 0, "REGULAR": 1, "POWER_POOL": 2}
-    ready = sorted(ready, key=lambda r: order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 1))
-    regular_waiting = any((r.get("kind") or "REGULAR") == "REGULAR" and not r.get("super") for r in ready)
+    # User, 2026-10-23: SuperAlpha first, then Power Pool, then regular alphas.
+    order = {"SUPER": 0, "POWER_POOL": 1, "REGULAR": 2}
+    ready = sorted(ready, key=lambda r: order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 2))
     for r in ready:
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
         shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= quota["REGULAR"]
         if used[kind] >= quota[kind] or shared_full or tried.get(aid) == today:
             continue
-        if kind == "POWER_POOL" and (regular_waiting or not power_pool_window(cfg)):
+        if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
         try:
             checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
@@ -575,8 +575,9 @@ def auto_submit(ready, cfg):
             used[kind] += 1
             submitted_any = True
             st = alpha.get("is") or {}
-            counts = (f"{used['REGULAR']}/{quota['REGULAR']} alphas, {used['POWER_POOL']}/{quota['POWER_POOL']} "
-                      f"Power Pool, {used['SUPER']}/{quota['SUPER']} SuperAlpha")
+            counts = (f"{used['REGULAR'] + used['POWER_POOL']}/{quota['REGULAR']} shared slots "
+                      f"({used['POWER_POOL']} Power Pool, {used['REGULAR']} regular), "
+                      f"{used['SUPER']}/{quota['SUPER']} SuperAlpha")
             log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
                 f"today {counts}")
             name = {"SUPER": "SuperAlpha", "POWER_POOL": "Power Pool alpha"}.get(kind, "alpha")
@@ -691,11 +692,13 @@ def write_reports(cfg):
     # is left, at most `power_pool_daily_quota`, and only when no regular alpha is waiting.
     used = submitted_today()
     total = cfg.get("alpha_daily_quota", 4)
-    regular_ready = [r for r in ready if alpha_kind(r, know.checks) == "REGULAR"]
-    regular_room = max(0, total - used["REGULAR"] - used["POWER_POOL"])
-    pool_room = 0 if regular_ready or not power_pool_window(cfg) else min(
-        max(0, cfg.get("power_pool_daily_quota", 1) - used["POWER_POOL"]), regular_room)
-    for kind, room, key in (("REGULAR", regular_room, "alpha"), ("POWER_POOL", pool_room, "Power Pool")):
+    # User, 2026-10-23: SuperAlpha first, then Power Pool, then regular alphas, within the shared 4 a day.
+    shared_room = max(0, total - used["REGULAR"] - used["POWER_POOL"])
+    pool_ready = [r for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"]
+    pool_room = 0 if not power_pool_window(cfg) else min(
+        max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
+    regular_room = max(0, shared_room - min(len(pool_ready), pool_room))
+    for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
             held = {r["alpha_id"] for r in same[room:]}
