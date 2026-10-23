@@ -477,10 +477,17 @@ class Brain:
                 r = self.s.get(f"{API}/alphas/{alpha_id}/check", timeout=30)
             except requests.RequestException:
                 continue
+            if r.status_code == 429:  # THROTTLED (2026-10-23: 30 quick asks were mostly refused): stop for now
+                break
+            time.sleep(1.5)
             if r.status_code != 200 or not r.text or float(r.headers.get("Retry-After", 0) or 0):
                 continue
             checks = (r.json().get("is") or {}).get("checks") or []
-            if checks and not any(c.get("result") in ("PENDING", "ERROR") for c in checks):
+            open_ = {c["name"]: c.get("result") for c in checks if c.get("result") in ("PENDING", "ERROR")}
+            # In a region with none of your submissions, BRAIN's preview can't compute self-correlation
+            # (ERROR) and then never starts production correlation (PENDING): that state is final.
+            new_region = open_.get("SELF_CORRELATION") == "ERROR" and set(open_) <= {"SELF_CORRELATION", "PROD_CORRELATION"}
+            if checks and (not open_ or new_region):
                 done.add(alpha_id)
         return done
 

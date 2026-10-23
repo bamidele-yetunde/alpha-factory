@@ -359,8 +359,14 @@ def run_super_round(cfg, jobs=None):
     import superalpha as SA
     from brain import BrainBusy, BrainError, BrainLoginBlocked
     sc = cfg.get("super", {})
-    for row in [r for r in SA.load() if r["verdict"] == "CHECKING"][:4]:
-        check_super(row, cfg)
+    checking = [r for r in SA.load() if r["verdict"] == "CHECKING"][:10]
+    # Collect the finished checks only: waiting 10 min for each of 4 took 20 min a round (2026-10-23).
+    finished = brain().finished_checks([r["alpha_id"] for r in checking]) if checking else set()
+    for row in checking:
+        if row["alpha_id"] in finished:
+            check_super(row, cfg)
+    if len(finished) < len(checking):
+        log(f"  SUPER: BRAIN is still computing {len(checking) - len(finished)} SuperAlpha checks; collected when ready")
     n = sc.get("per_cycle", 2)
     if not n or quota_low(cfg):
         return
@@ -449,7 +455,7 @@ def check_super(row, cfg):
     try:
         # SuperAlpha correlation checks take much longer than 90 s: on 2026-10-19 ten candidates stayed
         # "still computing" for hours with the regular 90-second wait.
-        checks, _ = brain().check(row["alpha_id"], max_seconds=cfg.get("super", {}).get("check_seconds", 600))
+        checks, _ = brain().check(row["alpha_id"], max_seconds=cfg.get("super", {}).get("check_seconds", 60))
     except BrainBusy:
         checks = None
     except BrainError as e:
@@ -538,6 +544,7 @@ def auto_submit(ready, cfg):
             continue
         try:
             checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
+            checks = settle_new_region(checks, aid, cfg) if kind != "SUPER" else checks
         except BrainBusy:
             log(f"AUTO-SUBMIT {aid}: BRAIN's check is slow; trying again next round")
             continue
@@ -873,6 +880,39 @@ QUOTA_CHECKS = {"REGULAR_SUBMISSION", "SUPER_SUBMISSION"}
 REGULAR_BAR = {"LOW_SHARPE", "LOW_FITNESS", "PROD_CORRELATION", "LOW_2Y_SHARPE", "IS_LADDER_SHARPE"}
 
 
+def settle_new_region(checks, alpha_id, cfg):
+    """BRAIN's preview check can't compute self-correlation in a region where you have no submission yet
+    (SELF_CORRELATION ERROR, PROD_CORRELATION then stays PENDING), so it never finishes. On submission BRAIN
+    computes both: mLYox7b5 (IND, your first India alpha) was accepted as a Regular Alpha on 2026-10-23 with
+    the preview stuck like that. With no submission in the region there is nothing to be self-correlated
+    with, and production correlation is measured directly; BRAIN still decides at submission."""
+    from brain import BrainError
+    by = {c["name"]: c for c in checks}
+    if by.get("SELF_CORRELATION", {}).get("result") != "ERROR" or             by.get("PROD_CORRELATION", {}).get("result") not in ("PENDING", "ERROR", None):
+        return checks
+    region = alpha_region(alpha_id)
+    if any((s.get("region") or "USA") == region and s.get("type") != "SUPER" for s in load_csv(SUBMITTED)):
+        return checks  # you have alphas there, so the error is BRAIN's: wait for a proper check
+    prod = load_prodcorr().get(alpha_id)
+    if prod is None:
+        try:
+            prod = brain().prod_corr(alpha_id)
+            save_prod_corr({alpha_id: prod})
+        except BrainError:
+            return checks
+    if prod is None:
+        return checks
+    limit = cfg.get("unique_prod_corr", 0.7)
+    out = []
+    for c in checks:
+        if c["name"] == "SELF_CORRELATION":
+            c = {**c, "result": "PASS", "value": 0.0}
+        elif c["name"] == "PROD_CORRELATION":
+            c = {**c, "result": "PASS" if prod < limit else "FAIL", "value": prod, "limit": limit}
+        out.append(c)
+    return out
+
+
 def alpha_kind(r, checks):
     """SUPER, POWER_POOL (passes BRAIN's check only as a Power Pool alpha) or REGULAR, for quotas."""
     if r.get("super"):
@@ -941,6 +981,7 @@ def verify(alpha_id, cfg, brain_allowed=True):
         except Exception as e:
             log(f"DESCRIPTION for {alpha_id} failed before its check: {str(e)[:120]}")
     checks, correlated = brain().check(alpha_id, max_seconds=cfg.get("check_seconds", 180))
+    checks = settle_new_region(checks, alpha_id, cfg)
     prod = next((c.get("value") for c in checks if c["name"] == "PROD_CORRELATION" and c.get("value") is not None), None)
     if prod is not None:
         save_prod_corr({alpha_id: prod})
@@ -1074,8 +1115,10 @@ def verify_pending(cfg, sync_each=False):
         finished = brain().finished_checks(head)
         waiting = waiting - finished
         computing = [a for a in head if a not in finished]
-        pending = [a for a in pending if a not in computing]
-        pending.sort(key=lambda a: a not in finished)  # finished ones first, otherwise unchanged order
+        # Finished checks first, then a few others with a short wait (that starts their checks). Waiting
+        # minutes on unfinished checks used the whole chunk on 2026-10-23, so no simulations ran.
+        others = [a for a in pending if a not in head][:cfg.get("verify_others", 5)]
+        pending = [a for a in pending if a in finished] + others
         if computing:
             log(f"  BRAIN is still computing the checks of {len(computing)} strong alphas "
                 f"(e.g. {', '.join(computing[:4])}); collected when ready")

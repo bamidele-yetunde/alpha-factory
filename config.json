@@ -235,7 +235,8 @@
       20,
       30
     ],
-    "min_region_alphas": 10
+    "min_region_alphas": 10,
+    "check_seconds": 60
   },
   "sim_reserve": 100,
   "rules_since": "2026-10-18T00:00:00",
@@ -457,6 +458,8 @@
   "unique_skips_robustness": true,
   "family_share": 0.5,
   "power_pool_after_hour_et": 0,
-  "check_seconds": 180,
-  "prestart_checks": 30
+  "check_seconds": 30,
+  "prestart_checks": 30,
+  "verify_others": 5,
+  "prod_corr_budget_seconds": 120
 }
