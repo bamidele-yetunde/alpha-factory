@@ -467,6 +467,23 @@ class Brain:
             except requests.RequestException:
                 pass
 
+    def finished_checks(self, alpha_ids):
+        """Ask once (no waiting) which of these alphas' pre-submission checks BRAIN has finished: a check with
+        a robust-universe test (IND, CHN) runs a second simulation and took far longer than the bot waited
+        (2026-10-22: the strongest IND alphas came back "unfinished" every time). Starts any not started yet."""
+        done = set()
+        for alpha_id in alpha_ids:
+            try:
+                r = self.s.get(f"{API}/alphas/{alpha_id}/check", timeout=30)
+            except requests.RequestException:
+                continue
+            if r.status_code != 200 or not r.text or float(r.headers.get("Retry-After", 0) or 0):
+                continue
+            checks = (r.json().get("is") or {}).get("checks") or []
+            if checks and not any(c.get("result") in ("PENDING", "ERROR") for c in checks):
+                done.add(alpha_id)
+        return done
+
     def yearly_stats(self, alpha_id):
         r = self._wait(f"{API}/alphas/{alpha_id}/recordsets/yearly-stats", max_seconds=5 * 60)
         if r.status_code != 200:

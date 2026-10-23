@@ -458,5 +458,5 @@
   "family_share": 0.5,
   "power_pool_after_hour_et": 0,
   "check_seconds": 180,
-  "prestart_checks": 15
+  "prestart_checks": 30
 }

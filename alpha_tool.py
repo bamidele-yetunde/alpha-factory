@@ -1067,9 +1067,20 @@ def verify_pending(cfg, sync_each=False):
     import time
     _last_verify = time.time()
     if pending:
-        # Start BRAIN's checks for the strongest ones together; the loop below then collects them.
-        brain().start_checks([a for a in pending if a not in waiting][:cfg.get("prestart_checks", 15)])
-        log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness)")
+        # BRAIN computes checks in the background. Ask which of the strongest are finished (starting the rest),
+        # verify those now, and leave the still-computing ones for the next round with no back-off: they are
+        # collected when ready instead of being waited on one by one.
+        head = pending[:cfg.get("prestart_checks", 30)]  # asking costs nothing, so backed-off ones too
+        finished = brain().finished_checks(head)
+        waiting = waiting - finished
+        computing = [a for a in head if a not in finished]
+        pending = [a for a in pending if a not in computing]
+        pending.sort(key=lambda a: a not in finished)  # finished ones first, otherwise unchanged order
+        if computing:
+            log(f"  BRAIN is still computing the checks of {len(computing)} strong alphas "
+                f"(e.g. {', '.join(computing[:4])}); collected when ready")
+        log(f"Verifying {len(pending)} in-sample passes (self-correlation + robustness; "
+            f"{len(finished)} with BRAIN's check ready)")
         verify_and_record(pending, cfg, sync_each=sync_each, local_only=waiting,
                           deadline=time.time() + cfg.get("verify_budget_minutes", 15) * 60)
 
