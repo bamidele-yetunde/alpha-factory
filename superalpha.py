@@ -52,7 +52,8 @@ SELECTIONS = [
      "only the components least like the production pool (production correlation below 0.4)"),
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
-SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10"}  # RRA2Ppxb, 2026-10-18
+SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10",  # RRA2Ppxb, 2026-10-18
+                     "balanced_low_corr|combo_a_250|STATISTICAL|d4|n10"}  # omo0QEqJ, 2026-10-24 (prod corr 0.61)
 CATEGORY_SELECTION = ('in(datacategories, "{cat}") * (1 - prod_correlation)', "POSITIVE")
 
 INV_CORR = ("stats = generate_stats(alpha); innerCorr = self_corr(stats.returns, 500); "
