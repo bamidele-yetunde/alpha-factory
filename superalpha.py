@@ -46,6 +46,10 @@ SELECTIONS = [
      "only components clearly unlike the production pool"),
     ("unique_lowturn", "(prod_correlation < 0.55) * (turnover < 0.2) * (1 - prod_correlation)", "POSITIVE",
      "unique, slow-trading components"),
+    # 2026-10-24: four unique_only recipes (MARKET neutralisation) were refused at production correlation
+    # 0.76-0.83: keep only the clearly unique components.
+    ("ultra_unique", "(prod_correlation < 0.4) * (1 - prod_correlation)", "POSITIVE",
+     "only the components least like the production pool (production correlation below 0.4)"),
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
 SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10"}  # RRA2Ppxb, 2026-10-18

@@ -221,10 +221,9 @@
   "super": {
     "per_cycle": 2,
     "neutralizations": [
+      "CROWDING",
       "STATISTICAL",
-      "MARKET",
-      "SLOW_AND_FAST",
-      "CROWDING"
+      "SLOW_AND_FAST"
     ],
     "decays": [
       2,
@@ -232,8 +231,7 @@
     ],
     "limits": [
       10,
-      20,
-      30
+      15
     ],
     "min_region_alphas": 10,
     "check_seconds": 60,
