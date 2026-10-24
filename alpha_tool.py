@@ -359,14 +359,20 @@ def run_super_round(cfg, jobs=None):
     import superalpha as SA
     from brain import BrainBusy, BrainError, BrainLoginBlocked
     sc = cfg.get("super", {})
-    checking = [r for r in SA.load() if r["verdict"] == "CHECKING"][:10]
+    checking = [r for r in SA.load() if r["verdict"] == "CHECKING"][::-1][:10]  # newest first
     # Collect the finished checks only: waiting 10 min for each of 4 took 20 min a round (2026-10-23).
     finished = brain().finished_checks([r["alpha_id"] for r in checking]) if checking else set()
     for row in checking:
         if row["alpha_id"] in finished:
             check_super(row, cfg)
-    if len(finished) < len(checking):
-        log(f"  SUPER: BRAIN is still computing {len(checking) - len(finished)} SuperAlpha checks; collected when ready")
+    stuck = [r for r in checking if r["alpha_id"] not in finished]
+    for row in stuck[:cfg.get("super", {}).get("prod_gate_per_round", 6)]:
+        # BRAIN's preview never finishes: verify again, which now decides by measured production correlation
+        # (and attaches the descriptions); BRAIN decides the rest on submission.
+        verify_super(row, cfg)
+    if stuck:
+        log(f"  SUPER: {len(stuck)} SuperAlpha checks still computing on BRAIN; up to "
+            f"{cfg.get('super', {}).get('prod_gate_per_round', 6)} settled by production correlation this round")
     n = sc.get("per_cycle", 2)
     if not n or quota_low(cfg):
         return
@@ -424,9 +430,14 @@ def verify_super(row, cfg):
     requires (SELECTION/COMBO_DESCRIPTION_LENGTH tests); then BRAIN's own submission check."""
     import descriptions as D
     alpha_id = row["alpha_id"]
-    corr, closest, blocked = corr_screen(alpha_id, cfg)
+    corr, closest, _ = corr_screen(alpha_id, cfg)
+    # BRAIN passed SuperAlpha E5VMPvrL's self-correlation at 0.776 (2026-10-24), so 0.7 was stricter than BRAIN.
+    blocked = corr is not None and corr >= cfg.get("super", {}).get("self_corr_limit", 0.8)
     sharpes, problems = robustness(alpha_id, cfg)
     row["self_corr"], row["corr_with"] = (round(corr, 4) if corr is not None else ""), closest
+    if not blocked and not problems and super_prod_gate(row, cfg) != "ok":
+        _update_super(row)
+        return
     if blocked or problems:
         row["verdict"] = "FAIL"
         row["verify_detail"] = "; ".join(
@@ -445,7 +456,33 @@ def verify_super(row, cfg):
     brain().describe(alpha_id, selection=sel_text, combo=combo_text, name=name)
     row["described"] = "yes"
     log(f"  SUPER {alpha_id}: descriptions attached ({D._words(sel_text)} + {D._words(combo_text)} words)")
-    check_super(row, cfg)
+    # BRAIN's preview of SuperAlpha correlation tests stays PENDING for days (59 waiting on 2026-10-24), so
+    # production correlation is measured directly and BRAIN decides the rest on submission.
+    row["verdict"] = "PASS"
+    _update_super(row)
+    log(f"  SUPER {alpha_id}: PASS ({row['verify_detail']}); BRAIN decides self-correlation at submission")
+
+
+def super_prod_gate(row, cfg):
+    """Production correlation of a SuperAlpha, read directly (matches BRAIN: E5VMPvrL 0.8614 both ways).
+    Returns "ok" (below 0.7, recorded in verify_detail), "fail" (row set to FAIL) or "busy" (row CHECKING)."""
+    from brain import BrainBusy, BrainError
+    try:
+        pc = brain().prod_corr(row["alpha_id"], max_seconds=60)
+    except BrainBusy:
+        row["verdict"] = "CHECKING"
+        return "busy"
+    except BrainError as e:
+        log(f"  SUPER {row['alpha_id']}: production correlation unavailable ({str(e)[:80]})")
+        row["verdict"] = "CHECKING"
+        return "busy"
+    limit = cfg.get("unique_prod_corr", 0.7)
+    if pc is not None and pc >= limit:
+        row["verdict"], row["verify_detail"] = "FAIL", f"PROD_CORRELATION {pc} (limit {limit}, measured)"
+        log(f"  SUPER VERIFY {row['alpha_id']}: FAIL  {row['verify_detail']}")
+        return "fail"
+    row["verify_detail"] = f"production correlation {pc} (measured)"
+    return "ok"
 
 
 def check_super(row, cfg):
@@ -542,6 +579,8 @@ def auto_submit(ready, cfg):
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
+        if kind == "REGULAR" and not regular_window(cfg):
+            continue
         try:
             checks, _ = brain().check(aid, max_seconds=600 if kind == "SUPER" else 180)
             checks = settle_new_region(checks, aid, cfg) if kind != "SUPER" else checks
@@ -551,7 +590,8 @@ def auto_submit(ready, cfg):
         except BrainError as e:
             log(f"AUTO-SUBMIT {aid}: check failed ({str(e)[:100]}); trying again next round")
             continue
-        if any(c.get("result") == "PENDING" for c in checks):
+        pending = {c["name"] for c in checks if c.get("result") == "PENDING"}
+        if pending and not (kind == "SUPER" and pending <= {"SELF_CORRELATION", "PROD_CORRELATION"}):
             log(f"AUTO-SUBMIT {aid}: BRAIN still computing some tests; trying again next round")
             continue
         limit_hit = [c["name"] for c in checks if c.get("result") == "FAIL" and c["name"] in QUOTA_CHECKS]
@@ -588,6 +628,12 @@ def auto_submit(ready, cfg):
         else:
             bad = [f"{c['name']}" for c in (alpha.get("is") or {}).get("checks", []) if c.get("result") == "FAIL"]
             log(f"AUTO-SUBMIT {aid}: BRAIN did not accept it (stage {alpha.get('stage')}; failing {bad})")
+            if kind == "SUPER" and bad:
+                import superalpha as SA
+                for srow in SA.load():
+                    if srow["alpha_id"] == aid:
+                        srow["verdict"], srow["verify_detail"] = "FAIL", f"refused by BRAIN on submission: {', '.join(bad)}"
+                        _update_super(srow)
             telegram(f"⚠️ BRAIN did not accept {code(aid)} (failing: {esc(', '.join(bad) or 'unknown')}).")
     if submitted_any:
         sync_submitted()
@@ -648,6 +694,19 @@ def power_pool_window(cfg):
     return hour >= cfg.get("power_pool_after_hour_et", 20)
 
 
+def regular_window(cfg):
+    """User, 2026-10-24: SuperAlpha first, then Power Pool. Regular alphas only take a shared slot from
+    `regular_after_hour_et` (US Eastern; 14 = 19:00 Lagos) on, so Power Pool gets the day first: on 24 Oct
+    four regular alphas filled all 4 slots by 16:12 Lagos."""
+    try:
+        from zoneinfo import ZoneInfo
+        hour = datetime.now(ZoneInfo("America/New_York")).hour
+    except Exception:
+        from datetime import timedelta, timezone
+        hour = datetime.now(timezone(timedelta(hours=-4))).hour
+    return hour >= cfg.get("regular_after_hour_et", 14)
+
+
 def submitted_today():
     """Submissions on today's BRAIN day by kind (SUPER, REGULAR, POWER_POOL), from submitted_alphas.csv."""
     today = brain_today()
@@ -697,7 +756,7 @@ def write_reports(cfg):
     pool_ready = [r for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"]
     pool_room = 0 if not power_pool_window(cfg) else min(
         max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
-    regular_room = max(0, shared_room - min(len(pool_ready), pool_room))
+    regular_room = 0 if not regular_window(cfg) else max(0, shared_room - min(len(pool_ready), pool_room))
     for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:

@@ -236,7 +236,9 @@
       30
     ],
     "min_region_alphas": 10,
-    "check_seconds": 60
+    "check_seconds": 60,
+    "self_corr_limit": 0.8,
+    "prod_gate_per_round": 6
   },
   "sim_reserve": 100,
   "rules_since": "2026-10-18T00:00:00",
@@ -461,5 +463,6 @@
   "check_seconds": 30,
   "prestart_checks": 30,
   "verify_others": 5,
-  "prod_corr_budget_seconds": 120
+  "prod_corr_budget_seconds": 120,
+  "regular_after_hour_et": 14
 }
