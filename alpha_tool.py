@@ -562,8 +562,11 @@ def auto_submit(ready, cfg):
     from notify import code, esc, telegram
     today = brain_today()
     used = submitted_today()
-    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("alpha_daily_quota", 4),
-             "POWER_POOL": cfg.get("power_pool_daily_quota", 2)}
+    # User, 2026-10-24: 1 SuperAlpha, 1 Power Pool and 1 regular alpha a day (`regular_daily_quota`), within
+    # BRAIN's shared 4 for Power Pool + regular (`alpha_daily_quota`).
+    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("regular_daily_quota", 1),
+             "POWER_POOL": cfg.get("power_pool_daily_quota", 1)}
+    shared = cfg.get("alpha_daily_quota", 4)
     state = load_notified()
     tried = state.get("submit_attempts", {})
     submitted_any = False
@@ -574,7 +577,7 @@ def auto_submit(ready, cfg):
     for r in ready:
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
-        shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= quota["REGULAR"]
+        shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= shared
         if used[kind] >= quota[kind] or shared_full or tried.get(aid) == today:
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
@@ -615,9 +618,8 @@ def auto_submit(ready, cfg):
             used[kind] += 1
             submitted_any = True
             st = alpha.get("is") or {}
-            counts = (f"{used['REGULAR'] + used['POWER_POOL']}/{quota['REGULAR']} shared slots "
-                      f"({used['POWER_POOL']} Power Pool, {used['REGULAR']} regular), "
-                      f"{used['SUPER']}/{quota['SUPER']} SuperAlpha")
+            counts = (f"{used['SUPER']}/{quota['SUPER']} SuperAlpha, {used['POWER_POOL']}/{quota['POWER_POOL']} "
+                      f"Power Pool, {used['REGULAR']}/{quota['REGULAR']} regular")
             log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
                 f"today {counts}")
             name = {"SUPER": "SuperAlpha", "POWER_POOL": "Power Pool alpha"}.get(kind, "alpha")
@@ -756,7 +758,9 @@ def write_reports(cfg):
     pool_ready = [r for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"]
     pool_room = 0 if not power_pool_window(cfg) else min(
         max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
-    regular_room = 0 if not regular_window(cfg) else max(0, shared_room - min(len(pool_ready), pool_room))
+    regular_room = 0 if not regular_window(cfg) else min(
+        max(0, shared_room - min(len(pool_ready), pool_room)),
+        max(0, cfg.get("regular_daily_quota", 1) - used["REGULAR"]))
     for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
