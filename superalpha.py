@@ -50,10 +50,14 @@ SELECTIONS = [
     # 0.76-0.83: keep only the clearly unique components.
     ("ultra_unique", "(prod_correlation < 0.4) * (1 - prod_correlation)", "POSITIVE",
      "only the components least like the production pool (production correlation below 0.4)"),
+    # A region with just 10 submitted alphas: filters leave fewer than BRAIN's minimum of 10, so take them all
+    # (YPxeQew6, IND, 2026-10-25: Sharpe 4.85, production correlation 0.69, accepted).
+    ("all", "1", "POSITIVE", "every submitted alpha in the region (a young, unique pool)"),
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
 SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10",  # RRA2Ppxb, 2026-10-18
-                     "balanced_low_corr|combo_a_250|STATISTICAL|d4|n10"}  # omo0QEqJ, 2026-10-24 (prod corr 0.61)
+                     "balanced_low_corr|combo_a_250|STATISTICAL|d4|n10",  # omo0QEqJ, 2026-10-24 (prod corr 0.61)
+                     "all|combo_a_250|STATISTICAL|d4|n10|IND"}  # YPxeQew6, 2026-10-25 (IND, Sharpe 4.85, 0.69)
 CATEGORY_SELECTION = ('in(datacategories, "{cat}") * (1 - prod_correlation)', "POSITIVE")
 
 INV_CORR = ("stats = generate_stats(alpha); innerCorr = self_corr(stats.returns, 500); "
