@@ -373,6 +373,7 @@ def run_super_round(cfg, jobs=None):
     if stuck:
         log(f"  SUPER: {len(stuck)} SuperAlpha checks still computing on BRAIN; up to "
             f"{cfg.get('super', {}).get('prod_gate_per_round', 6)} settled by production correlation this round")
+    super_direct_submit(cfg)
     n = sc.get("per_cycle", 2)
     if not n or quota_low(cfg):
         return
@@ -461,6 +462,57 @@ def verify_super(row, cfg):
     row["verdict"] = "PASS"
     _update_super(row)
     log(f"  SUPER {alpha_id}: PASS ({row['verify_detail']}); BRAIN decides self-correlation at submission")
+
+
+def super_direct_submit(cfg):
+    """User, 2026-10-25: the SuperAlpha comes first every day. When today's SuperAlpha slot is still empty, submit
+    the most promising candidate waiting on BRAIN (no production correlation available: BRAIN's correlation
+    service gave nothing all day on 2026-10-25 while 16 candidates waited) and let BRAIN decide; a refusal does
+    not use the slot. One per round; each candidate is tried once (`super_submit_tried` in notified.json)."""
+    if not cfg.get("auto_submit") or submitted_today()["SUPER"] >= cfg.get("super_daily_quota", 1):
+        return
+    import superalpha as SA
+    import descriptions as D
+    from brain import BrainError
+    from notify import code, esc, telegram
+    state = load_notified()
+    tried = set(state.get("super_submit_tried", []))
+    subs = {s["id"] for s in load_csv(SUBMITTED)}
+    book, sas = pnl_book(), [s["id"] for s in load_csv(SUBMITTED) if s.get("type") == "SUPER"]
+    unique_first = ("ultra_unique", "low_prod_corr", "unique_only", "unique_lowturn", "balanced_low_corr")
+    cands = [r for r in SA.load() if r["verdict"] in ("CHECKING", "PASS") and r["alpha_id"]
+             and r["alpha_id"] not in tried and r["alpha_id"] not in subs and not r.get("error")]
+    cands.sort(key=lambda r: (not r["recipe"].startswith(unique_first), -float(r["fitness"] or 0)))
+    for row in cands[:5]:
+        corrs = [c for c in (book.corr(row["alpha_id"], o) for o in sas) if c is not None]
+        if corrs and max(corrs) >= cfg.get("super", {}).get("self_corr_limit", 0.8):
+            continue  # a copy of one of your SuperAlphas
+        aid = row["alpha_id"]
+        tried.add(aid)
+        state["super_submit_tried"] = sorted(tried)
+        save_notified(state)
+        try:
+            sel, combo = D.describe_super(row["selection"], row["combo"], json.loads(row["settings"]))
+            brain().describe(aid, selection=sel, combo=combo, name="SA " + row["recipe"].replace("|", " ")[:60])
+            alpha = brain().submit(aid)
+        except BrainError as e:
+            log(f"AUTO-SUBMIT {aid}: SuperAlpha submission failed ({str(e)[:120]})")
+            return
+        st = alpha.get("is") or {}
+        if alpha.get("stage") == "OS":
+            log(f"AUTO-SUBMIT {aid}: SUBMITTED (SUPER, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}; "
+                f"{row['recipe']}) - BRAIN decided directly")
+            telegram(f"📤 SUBMITTED SuperAlpha {code(aid)}\nSharpe {esc(st.get('sharpe'))} | Fitness {esc(st.get('fitness'))}")
+            row["verdict"] = "PASS"
+            _update_super(row)
+            sync_submitted()
+        else:
+            bad = [f"{c['name']} {c.get('value')}" for c in st.get("checks", []) if c.get("result") == "FAIL"]
+            row["verdict"], row["verify_detail"] = "FAIL", f"refused by BRAIN on submission: {', '.join(bad)}"
+            _update_super(row)
+            log(f"AUTO-SUBMIT {aid}: SuperAlpha refused by BRAIN ({', '.join(bad) or 'no reason given'}); "
+                "the next candidate is tried next round")
+        return
 
 
 def super_prod_gate(row, cfg):

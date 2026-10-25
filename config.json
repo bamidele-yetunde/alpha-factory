@@ -226,12 +226,11 @@
       "SLOW_AND_FAST"
     ],
     "decays": [
-      2,
-      4
+      4,
+      2
     ],
     "limits": [
-      10,
-      15
+      10
     ],
     "min_region_alphas": 10,
     "check_seconds": 60,
