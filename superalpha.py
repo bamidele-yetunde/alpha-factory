@@ -53,6 +53,12 @@ SELECTIONS = [
     # A region with just 10 submitted alphas: filters leave fewer than BRAIN's minimum of 10, so take them all
     # (YPxeQew6, IND, 2026-10-25: Sharpe 4.85, production correlation 0.69, accepted).
     ("all", "1", "POSITIVE", "every submitted alpha in the region (a young, unique pool)"),
+    # Rankings rather than filters, so a small regional pool still yields 10 components, and each picks a
+    # different 10: N1NXWe7L (IND, slowest-trading 10, SLOW_AND_FAST) was accepted on 2026-10-26 at 0.696
+    # with YPxeQew6, while rankings close to its own gave 0.89-0.91.
+    ("rank_low_turnover", "1 - turnover", "POSITIVE", "the slowest-trading components"),
+    ("rank_low_self_corr", "1 - self_correlation", "POSITIVE", "the components least like the rest of my pool"),
+    ("rank_low_prod_corr", "1 - prod_correlation", "POSITIVE", "the components least like the production pool"),
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
 SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10",  # RRA2Ppxb, 2026-10-18
