@@ -616,7 +616,8 @@ def auto_submit(ready, cfg):
     used = submitted_today()
     # User, 2026-10-24: 1 SuperAlpha, 1 Power Pool and 1 regular alpha a day (`regular_daily_quota`), within
     # BRAIN's shared 4 for Power Pool + regular (`alpha_daily_quota`).
-    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": cfg.get("regular_daily_quota", 1),
+    focus = focus_region(cfg)
+    quota = {"SUPER": cfg.get("super_daily_quota", 1), "REGULAR": regular_quota(cfg),
              "POWER_POOL": cfg.get("power_pool_daily_quota", 1)}
     shared = cfg.get("alpha_daily_quota", 4)
     state = load_notified()
@@ -634,6 +635,8 @@ def auto_submit(ready, cfg):
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
+        if kind == "REGULAR" and focus and alpha_region(aid) != focus:
+            continue  # building the focus region's pool to 10 for its SuperAlphas
         if kind == "REGULAR" and not regular_window(cfg):
             continue
         try:
@@ -754,6 +757,21 @@ def power_pool_window(cfg):
     return hour >= cfg.get("power_pool_after_hour_et", 20)
 
 
+def focus_region(cfg):
+    """User, 2026-10-26 (option B): regular slots go to one region (`focus_region`) until it has `focus_target`
+    (10) submitted alphas, BRAIN's minimum for a SuperAlpha there; then back to normal by itself. SuperAlphas
+    stay first: USA SuperAlphas are refused on production correlation, regional ones pass (YPxeQew6, IND)."""
+    region = cfg.get("focus_region")
+    if not region:
+        return None
+    n = sum(1 for s in load_csv(SUBMITTED) if (s.get("region") or "USA") == region and s.get("type") != "SUPER")
+    return region if n < cfg.get("focus_target", 10) else None
+
+
+def regular_quota(cfg):
+    return cfg.get("focus_regular_quota", 4) if focus_region(cfg) else cfg.get("regular_daily_quota", 1)
+
+
 def regular_window(cfg):
     """User, 2026-10-24: SuperAlpha first, then Power Pool. Regular alphas only take a shared slot from
     `regular_after_hour_et` (US Eastern; 14 = 19:00 Lagos) on, so Power Pool gets the day first: on 24 Oct
@@ -816,9 +834,15 @@ def write_reports(cfg):
     pool_ready = [r for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"]
     pool_room = 0 if not power_pool_window(cfg) else min(
         max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
+    focus = focus_region(cfg)
+    if focus:  # only the focus region's regular alphas until it has enough for SuperAlphas
+        held = {r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "REGULAR"
+                and alpha_region(r["alpha_id"]) != focus}
+        ready = [r for r in ready if r["alpha_id"] not in held]
+        backups.update({h: (0.0, f"today's quota of {focus}-only regular alphas") for h in held})
     regular_room = 0 if not regular_window(cfg) else min(
         max(0, shared_room - min(len(pool_ready), pool_room)),
-        max(0, cfg.get("regular_daily_quota", 1) - used["REGULAR"]))
+        max(0, regular_quota(cfg) - used["REGULAR"]))
     for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
@@ -1399,6 +1423,7 @@ def run_cycle(cfg, dry_run=False):
     # alphas in 1,845 consultant-era simulations (2026-10-21).
     n_new = cfg["new_alphas_per_cycle"]
     n_family = round(n_new * cfg.get("family_share", 0.5))
+    cfg["_focus_region"] = focus_region(cfg)  # the learner gives it a bigger share of the new ideas
     know_now = knowledge(cfg)
     new = know_now.propose(templates, load_fields(cfg), done_keys(), n_new - n_family,
                            operators=operators, known_fields=field_ids)

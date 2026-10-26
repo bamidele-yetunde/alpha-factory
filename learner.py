@@ -379,6 +379,8 @@ class Knowledge:
             if sims[g] < cfg.get("region_probe_sims", 60):
                 factor = max(factor, 1.0)
             out[g] = round(prior.get(g, cfg.get("new_region_share", 0.06)) * factor, 4)
+            if g == cfg.get("_focus_region"):
+                out[g] = round(out[g] * cfg.get("focus_boost", 5), 4)  # building this region's pool
         self.region_stats = {g: (sims[g], good[g]) for g in regions}
         return out
 

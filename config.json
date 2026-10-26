@@ -462,5 +462,9 @@
   "verify_others": 5,
   "prod_corr_budget_seconds": 120,
   "regular_after_hour_et": 0,
-  "regular_daily_quota": 1
+  "regular_daily_quota": 1,
+  "focus_region": "TWN",
+  "focus_target": 10,
+  "focus_regular_quota": 4,
+  "focus_boost": 5
 }
