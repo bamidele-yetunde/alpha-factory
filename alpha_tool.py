@@ -659,6 +659,12 @@ def auto_submit(ready, cfg):
         failed = [f"{c['name']} {c.get('value')} (limit {c.get('limit')})" for c in checks if c.get("result") == "FAIL"]
         if failed:
             log(f"AUTO-SUBMIT {aid}: not submitted, BRAIN's check now fails: {'; '.join(failed)}")
+            if kind == "SUPER":  # off the ready list for good (the same three were re-checked every day)
+                import superalpha as SA
+                for srow in SA.load():
+                    if srow["alpha_id"] == aid:
+                        srow["verdict"], srow["verify_detail"] = "FAIL", f"BRAIN's check: {'; '.join(failed)}"
+                        _update_super(srow)
             continue
         try:
             alpha = brain().submit(aid)
