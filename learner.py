@@ -546,7 +546,8 @@ class Knowledge:
             datasets = [d for d in pools[kind] if d != exclude_dataset and keep(d)]
             if not datasets:
                 return None, None
-            dataset = self.pick("dataset", allowed("dataset", sorted(datasets)))
+            # Datasets of a pyramid one or two submissions short weigh more (alpha_tool.pyramid_boosts).
+            dataset = self.pick("dataset", allowed("dataset", sorted(datasets)), getattr(self, "pyramid_boost", None))
             options = [f for f in allowed("field", pools[kind][dataset])
                        if per_field[f] < cfg["max_per_field_per_cycle"] and f not in banned_fields]
             return (self.pick("field", options, saturated), dataset) if options else (None, None)

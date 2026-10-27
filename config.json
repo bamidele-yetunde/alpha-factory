@@ -466,5 +466,16 @@
   "focus_region": "TWN",
   "focus_target": 10,
   "focus_regular_quota": 4,
-  "focus_boost": 5
+  "focus_boost": 5,
+  "pyramid_boost": 1.3,
+  "pyramid_submit_bonus": 0.15,
+  "osmosis": {
+    "enabled": true,
+    "min_scopes": 3,
+    "min_alphas": 10,
+    "per_scope": 20,
+    "max_corr": 0.7,
+    "points": 100000,
+    "every_hours": 24
+  }
 }

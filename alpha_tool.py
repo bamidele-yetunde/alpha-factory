@@ -822,6 +822,7 @@ def write_reports(cfg):
     before = {r["alpha_id"] for r in load_csv(READY)}
     supers = super_candidates()
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
+    ready = pyramid_order(ready, cfg)
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
     # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
@@ -959,6 +960,175 @@ def sync_submitted():
                              "submitted_at": a.get("dateSubmitted") or "",
                              "sharpe": (a.get("is") or {}).get("sharpe", ""), "type": submission_type(a),
                              "region": s.get("region", "USA")})
+    record_pyramids(alphas)
+
+
+def quarter_start():
+    """First day of this calendar quarter on BRAIN's clock: Genius levels and pyramids count per quarter."""
+    y, m, _ = brain_today().split("-")
+    return f"{y}-{(int(m) - 1) // 3 * 3 + 1:02d}-01"
+
+
+def record_pyramids(alphas):
+    """BRAIN tags each submission with its pyramids (region/delay/data category, e.g. USA/D1/PV); a pyramid counts
+    for the Genius level (quarterly payment) once it has 3 submissions in the quarter (BRAIN docs, "Brain Genius").
+    Saved for the idea picker and the submission order (pyramids 1-2 short come first), with what Osmosis needs."""
+    start = quarter_start()
+    counts = Counter(p["name"] for a in alphas if (a.get("dateSubmitted") or "")[:10] >= start
+                     for p in a.get("pyramids") or [])
+    state = load_notified()
+    state["pyramids"] = {"quarter": start, "counts": dict(counts)}
+    state["os_alphas"] = [{"id": a["id"], "region": (a.get("settings") or {}).get("region", "USA"),
+                           "delay": (a.get("settings") or {}).get("delay", 1), "type": a.get("type"),
+                           "sharpe": (a.get("is") or {}).get("sharpe") or 0, "points": a.get("osmosisPoints")}
+                          for a in alphas]
+    summary = (f"{sum(n >= 3 for n in counts.values())} formulated (3+ this quarter); one or two short: "
+               f"{', '.join(f'{p} {n}' for p, n in sorted(counts.items()) if n < 3) or 'none'}")
+    if state.get("pyramids_logged") != summary:
+        log(f"PYRAMIDS: {summary}")
+        state["pyramids_logged"] = summary
+    save_notified(state)
+
+
+def dataset_category(dataset, cats):
+    """BRAIN's data category of a dataset (from /data-sets, saved by discover_datasets), e.g. analyst4 -> analyst."""
+    import re
+    return cats.get(dataset) or (lambda b: b if b in PYRAMID_CATEGORIES else "")(re.sub(r"\d+$", "", dataset))
+
+
+PYRAMID_CATEGORIES = {"analyst", "broker", "earnings", "fundamental", "imbalance", "insiders", "institutions",
+                      "macro", "model", "news", "option", "other", "pv", "risk", "sentiment", "shortinterest",
+                      "socialmedia"}
+
+
+def pyramid_counts(cfg):
+    state = load_notified()
+    p = state.get("pyramids") or {}
+    return (p.get("counts", {}) if p.get("quarter") == quarter_start() else {}), state.get("dataset_categories", {})
+
+
+def pyramid_boosts(cfg):
+    """{dataset label: weight} for the idea picker: datasets whose pyramid has 1-2 submissions this quarter get
+    `pyramid_boost` (one or two more alphas there complete a pyramid)."""
+    counts, cats = pyramid_counts(cfg)
+    boost, delay = cfg.get("pyramid_boost", 1.3), cfg["settings"]["delay"]
+    out = {}
+    for ds, region in {(r["dataset"], r.get("region") or "USA") for r in load_csv(FIELDS)}:
+        cat = dataset_category(ds, cats)
+        if cat and 1 <= counts.get(f"{region}/D{delay}/{cat.upper()}", 0) < 3:
+            out[ds if region == "USA" else f"{ds}@{region}"] = boost
+    return out
+
+
+def pyramid_order(ready, cfg):
+    """Quality first (fitness), with a small lift (`pyramid_submit_bonus`, 15%) for a verified alpha that adds to
+    a pyramid with 2 submissions this quarter (half for 1): completing pyramids helps the Genius level."""
+    from learner import fields_in, num
+    counts, cats = pyramid_counts(cfg)
+    bonus, delay = cfg.get("pyramid_submit_bonus", 0.15), cfg["settings"]["delay"]
+    if not counts or not bonus:
+        return ready
+    field_ds = {(r["id"], r.get("region") or "USA"): r["dataset"] for r in load_csv(FIELDS)}
+
+    def lift(r):
+        s = r.get("settings") or {}
+        region = (json.loads(s) if isinstance(s, str) else s).get("region", "USA")
+        have = [counts.get(f"{region}/D{delay}/{c.upper()}", 0)
+                for c in {dataset_category(field_ds[(f, region)], cats) for f in fields_in(r["expression"])
+                          if (f, region) in field_ds} if c]
+        return bonus if 2 in have else bonus / 2 if 1 in have else 0.0
+    supers = [r for r in ready if r.get("super")]
+    rest = sorted((r for r in ready if not r.get("super")), key=lambda r: -num(r["fitness"]) * (1 + lift(r)))
+    return supers + rest
+
+
+def update_osmosis(cfg):
+    """Osmosis (BRAIN docs, "Osmosis Allocation Guide"): your own combo of submitted alphas, made from points you
+    give them. Its daily rank multiplies the base payment by 1-2x, and it counts for the Genius level. Valid only
+    with 3+ scopes (region x delay), each with exactly 100,000 points over 10+ alphas; points lock every Sunday
+    23:59 US Eastern. Once a day (and as soon as a new scope qualifies): equal points to the strongest, least
+    alike alphas of each scope."""
+    oc = cfg.get("osmosis", {})
+    if not oc.get("enabled"):
+        return
+    state = load_notified()
+    alphas = state.get("os_alphas") or []
+    scopes = {}
+    for a in alphas:
+        scopes.setdefault((a["region"], a["delay"]), []).append(a)
+    need = oc.get("min_alphas", 10)
+    ok = {k: v for k, v in scopes.items() if len(v) >= need}
+    key = sorted(f"{r}/D{d}" for r, d in ok)
+    last = state.get("osmosis_at")
+    if (last and key == state.get("osmosis_scopes")
+            and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < oc.get("every_hours", 24) * 3600):
+        return
+    state["osmosis_at"], state["osmosis_scopes"] = datetime.now().isoformat(timespec="seconds"), key
+    save_notified(state)
+    if len(ok) < oc.get("min_scopes", 3):
+        log(f"OSMOSIS: not yet - BRAIN needs {oc.get('min_scopes', 3)} regions with {need}+ submitted alphas each; "
+            f"now {', '.join(f'{r} {len(v)}' for (r, d), v in sorted(scopes.items(), key=lambda kv: -len(kv[1])))}")
+        return
+    desired = {}
+    for items in ok.values():
+        picks = osmosis_picks(items, oc)
+        each, extra = divmod(oc.get("points", 100000), len(picks))
+        desired.update({aid: each + (i < extra) for i, aid in enumerate(picks)})
+    changed, errors = 0, []
+    for a in alphas:
+        want = desired.get(a["id"])
+        if (a.get("points") or None) == want:
+            continue
+        r = brain().request("PATCH", f"/alphas/{a['id']}", json={"osmosisPoints": want})
+        if r.status_code >= 300 and want is None:  # if BRAIN won't take "no points", 0 points
+            r = brain().request("PATCH", f"/alphas/{a['id']}", json={"osmosisPoints": 0})
+        if r.status_code >= 300:
+            errors.append(f"{a['id']} {r.status_code} {r.text[:80]}")
+        else:
+            changed += 1
+            a["points"] = want
+    state = load_notified()
+    state["os_alphas"] = alphas
+    summary = ", ".join(f"{r} {sum(x['id'] in desired for x in v)} alphas" for (r, d), v in sorted(ok.items()))
+    log(f"OSMOSIS: {changed} alphas updated ({summary}; 100,000 points per region, locked Sunday 23:59 US Eastern)"
+        + (f"; {len(errors)} failed: {'; '.join(errors[:3])}" if errors else ""))
+    from notify import esc, telegram
+    if changed and not errors and not state.get("osmosis_announced"):
+        if telegram(f"🧪 Osmosis is set up: {esc(summary)}, 100,000 points each. BRAIN uses it from 7 days after "
+                    "next Sunday; its rank multiplies your daily base payment by 1-2x."):
+            state["osmosis_announced"] = datetime.now().isoformat(timespec="seconds")
+    if errors and not state.get("osmosis_error_alerted"):
+        if telegram(f"⚠️ Osmosis points could not be set ({len(errors)} alphas, e.g. {esc(errors[0][:100])}). "
+                    "You can set them on BRAIN's Alphas page (Submitted tab, Osmosis Points column)."):
+            state["osmosis_error_alerted"] = datetime.now().isoformat(timespec="seconds")
+    save_notified(state)
+
+
+def osmosis_picks(items, oc):
+    """Up to `per_scope` (20) alphas of one scope: strongest first (in-sample Sharpe), skipping one too alike
+    (daily-PnL correlation >= `max_corr`) an alpha already picked: the guide's tips are best, unique and
+    diversified. SuperAlphas only to reach BRAIN's 10 (they are built from the same alphas)."""
+    from learner import num
+    n, cap, need = oc.get("per_scope", 20), oc.get("max_corr", 0.7), oc.get("min_alphas", 10)
+    regs = sorted((a for a in items if a["type"] != "SUPER"), key=lambda a: -num(a["sharpe"]))
+    sups = sorted((a for a in items if a["type"] == "SUPER"), key=lambda a: -num(a["sharpe"]))
+    book, picks = pnl_book(), []
+    for a in regs:
+        if len(picks) >= n:
+            break
+        try:
+            alike = any((book.corr(a["id"], p) or 0) >= cap for p in picks)
+        except Exception:
+            alike = False
+        if not alike:
+            picks.append(a["id"])
+    for a in regs + sups:
+        if len(picks) >= need:
+            break
+        if a["id"] not in picks:
+            picks.append(a["id"])
+    book.save()
+    return picks
 
 
 def corr_screen(alpha_id, cfg):
@@ -1391,6 +1561,13 @@ def run_cycle(cfg, dry_run=False):
     if not dry_run:
         sync_submitted()
         requeue_once(cfg)
+        from brain import BrainLoginBlocked
+        try:
+            update_osmosis(cfg)
+        except BrainLoginBlocked:
+            raise
+        except Exception as e:  # never let it stop a cycle
+            log(f"OSMOSIS: skipped this round ({str(e)[:120]})")
         import time
         if time.time() - _last_verify > 10 * 60:  # the chunk start (watch_once) has just verified
             verify_pending(cfg)
@@ -1425,6 +1602,7 @@ def run_cycle(cfg, dry_run=False):
     n_family = round(n_new * cfg.get("family_share", 0.5))
     cfg["_focus_region"] = focus_region(cfg)  # the learner gives it a bigger share of the new ideas
     know_now = knowledge(cfg)
+    know_now.pyramid_boost = pyramid_boosts(cfg)  # pyramids 1-2 alphas short get more of the ideas
     new = know_now.propose(templates, load_fields(cfg), done_keys(), n_new - n_family,
                            operators=operators, known_fields=field_ids)
     if n_family:
@@ -1639,7 +1817,8 @@ def discover_datasets(cfg):
         state = load_notified()
         checked = state.get("datasets_checked", {})
         last = checked.get(region) or (state.get("datasets_checked_at") if region == "USA" else None)
-        if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < cfg.get("dataset_check_hours", 24) * 3600:
+        if (last and region in state.get("categories_for", [])
+                and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < cfg.get("dataset_check_hours", 24) * 3600):
             continue
         try:
             found, params = [], {"instrumentType": st["instrumentType"], "region": region, "delay": st["delay"],
@@ -1653,6 +1832,12 @@ def discover_datasets(cfg):
                 params["offset"] += params["limit"]
                 if not data["results"] or params["offset"] >= data["count"]:
                     break
+            # Each dataset's data category, for pyramids (region/delay/category; see record_pyramids).
+            cstate = load_notified()
+            cstate.setdefault("dataset_categories", {}).update(
+                {d["id"]: (d.get("category") or {}).get("id", "") for d in found})
+            cstate["categories_for"] = sorted(set(cstate.get("categories_for", [])) | {region})
+            save_notified(cstate)
             known = {r["dataset"] for r in load_csv(FIELDS) if (r.get("region") or "USA") == region}
             new = [d["id"] for d in found if d["id"] not in known]
             # A region's first download is large (EUR 33k fields): `dataset_batch` datasets per run until done.

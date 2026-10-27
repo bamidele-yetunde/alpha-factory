@@ -117,19 +117,19 @@ def propose(know, fields_rows, done, n, cfg):
         fill, field, dataset = {}, "", ""
         names = placeholders(pattern)
         if "num" in names:
-            num, dataset = random.choice(roles[region]["profit"])
+            num, dataset = choose(roles[region]["profit"], know)
             dens = [d for d in roles[region]["scale"] if d[1] == dataset] or roles[region]["scale"]
             den, _ = random.choice(dens)
             fill.update(num=num, den=den)
             field = f"{num}/{den}"
         if "est" in names:
-            fill["est"], dataset = random.choice(roles[region]["estimate"])
+            fill["est"], dataset = choose(roles[region]["estimate"], know)
             field = fill["est"]
         if "short" in names:
-            fill["short"], dataset = random.choice(roles[region]["short"])
+            fill["short"], dataset = choose(roles[region]["short"], know)
             field = fill["short"]
         if "ivc" in names:
-            fill["ivc"], fill["ivp"], dataset = random.choice(iv[region])
+            fill["ivc"], fill["ivp"], dataset = choose(iv[region], know)
             field = fill["ivc"]
         if (pattern, field) in tried:
             continue
@@ -154,6 +154,12 @@ def propose(know, fields_rows, done, n, cfg):
         out.append({"template": pattern, "field": field, "dataset": dataset, "window": "", "group": fill["group"],
                     "expression": expr, "settings": settings, "repair": "family", "parent": "", "depth": 0})
     return out
+
+
+def choose(options, know):
+    """A random option (its dataset label last), weighted towards pyramids one or two submissions short."""
+    boost = getattr(know, "pyramid_boost", None) or {}
+    return random.choices(options, weights=[boost.get(o[-1], 1.0) for o in options])[0]
 
 
 def family_ok(pattern, region, roles, iv_pairs):
