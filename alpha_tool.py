@@ -507,7 +507,10 @@ def super_direct_submit(cfg):
             _update_super(row)
             sync_submitted()
         else:
-            bad = [f"{c['name']} {c.get('value')}" for c in st.get("checks", []) if c.get("result") == "FAIL"]
+            bad = [f"{c['name']} {c.get('value')}" for c in alpha.get("_submit_checks") or st.get("checks", [])
+                   if c.get("result") == "FAIL"]
+            if not bad:
+                bad = [f"HTTP {alpha.get('_submit_status')}"]
             row["verdict"], row["verify_detail"] = "FAIL", f"refused by BRAIN on submission: {', '.join(bad)}"
             _update_super(row)
             log(f"AUTO-SUBMIT {aid}: SuperAlpha refused by BRAIN ({', '.join(bad) or 'no reason given'}); "
@@ -689,7 +692,8 @@ def auto_submit(ready, cfg):
                      f"Self-corr {esc(r.get('self_corr'))}\n"
                      f"Today: {esc(counts)}")
         else:
-            bad = [f"{c['name']}" for c in (alpha.get("is") or {}).get("checks", []) if c.get("result") == "FAIL"]
+            bad = [f"{c['name']} {c.get('value')}" for c in alpha.get("_submit_checks") or (alpha.get("is") or {}).get("checks", [])
+                   if c.get("result") == "FAIL"]
             log(f"AUTO-SUBMIT {aid}: BRAIN did not accept it (stage {alpha.get('stage')}; failing {bad})")
             if kind == "SUPER" and bad:
                 import superalpha as SA

@@ -531,5 +531,13 @@ class Brain:
         r = self.request("POST", f"/alphas/{alpha_id}/submit")
         if r.status_code not in (200, 201):
             raise BrainError(f"Submit rejected ({r.status_code}): {r.text[:300]}")
-        self._wait(f"{API}/alphas/{alpha_id}/submit", max_seconds=15 * 60)
-        return self.alpha(alpha_id)
+        done = self._wait(f"{API}/alphas/{alpha_id}/submit", max_seconds=15 * 60)
+        alpha = self.alpha(alpha_id)
+        # A refusal's reasons are only in this final answer (the alpha itself keeps its PENDING checks): on
+        # 2026-10-28 seven SuperAlphas were refused with "no reason given" because it was not read.
+        try:
+            alpha["_submit_checks"] = (done.json().get("is") or {}).get("checks", []) if done.text else []
+        except (ValueError, AttributeError):
+            alpha["_submit_checks"] = []
+        alpha["_submit_status"] = done.status_code
+        return alpha
