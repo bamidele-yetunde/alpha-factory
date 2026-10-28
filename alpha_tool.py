@@ -629,7 +629,11 @@ def auto_submit(ready, cfg):
     # Regular and Power Pool share BRAIN's 4 a day: regular alphas first, Power Pool only if none is waiting.
     # User, 2026-10-23: SuperAlpha first, then Power Pool, then regular alphas.
     order = {"SUPER": 0, "POWER_POOL": 1, "REGULAR": 2}
-    ready = sorted(ready, key=lambda r: order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 2))
+    region_of_alpha = {r["alpha_id"]: alpha_region(r["alpha_id"]) for r in ready} if focus else {}
+    # The focus region's regular alphas before any other region's (those only fill the evening fallback slot).
+    ready = sorted(ready, key=lambda r: (order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 2),
+                                         bool(focus) and region_of_alpha.get(r["alpha_id"]) != focus))
+    fallback = focus_fallback_room(cfg, focus)
     for r in ready:
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
@@ -638,7 +642,8 @@ def auto_submit(ready, cfg):
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
-        if kind == "REGULAR" and focus and alpha_region(aid) != focus:
+        other_region = kind == "REGULAR" and focus and region_of_alpha.get(aid, alpha_region(aid)) != focus
+        if other_region and fallback <= 0:
             continue  # building the focus region's pool to 10 for its SuperAlphas
         if kind == "REGULAR" and not regular_window(cfg):
             continue
@@ -680,6 +685,7 @@ def auto_submit(ready, cfg):
             continue
         if alpha.get("stage") == "OS":
             used[kind] += 1
+            fallback -= 1 if other_region else 0
             submitted_any = True
             st = alpha.get("is") or {}
             counts = (f"{used['SUPER']}/{quota['SUPER']} SuperAlpha, {used['POWER_POOL']}/{quota['POWER_POOL']} "
@@ -772,6 +778,26 @@ def focus_region(cfg):
     return region if n < cfg.get("focus_target", 10) else None
 
 
+def focus_fallback_room(cfg, focus):
+    """User, 2026-10-28 (option b): the focus region keeps first claim on regular slots, but from
+    `focus_fallback_after_hour_et` (14 = 19:00 Lagos) up to `focus_fallback_quota` (1) regular alpha of another
+    region may be submitted a day: on 28 Oct 22 verified IND/USA alphas waited while no TWN alpha passed."""
+    if not focus:
+        return 0
+    try:
+        from zoneinfo import ZoneInfo
+        hour = datetime.now(ZoneInfo("America/New_York")).hour
+    except Exception:
+        from datetime import timedelta, timezone
+        hour = datetime.now(timezone(timedelta(hours=-4))).hour
+    if hour < cfg.get("focus_fallback_after_hour_et", 14):
+        return 0
+    today = brain_today()
+    used = sum(1 for s in load_csv(SUBMITTED) if (s.get("submitted_at") or "")[:10] == today
+               and s.get("type", "REGULAR") == "REGULAR" and (s.get("region") or "USA") != focus)
+    return max(0, cfg.get("focus_fallback_quota", 1) - used)
+
+
 def regular_quota(cfg):
     return cfg.get("focus_regular_quota", 4) if focus_region(cfg) else cfg.get("regular_daily_quota", 1)
 
@@ -841,8 +867,9 @@ def write_reports(cfg):
         max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
     focus = focus_region(cfg)
     if focus:  # only the focus region's regular alphas until it has enough for SuperAlphas
-        held = {r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "REGULAR"
-                and alpha_region(r["alpha_id"]) != focus}
+        others = [r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "REGULAR"
+                  and alpha_region(r["alpha_id"]) != focus]
+        held = set(others[focus_fallback_room(cfg, focus):])  # the best one(s) take the evening fallback slot
         ready = [r for r in ready if r["alpha_id"] not in held]
         backups.update({h: (0.0, f"today's quota of {focus}-only regular alphas") for h in held})
     regular_room = 0 if not regular_window(cfg) else min(
