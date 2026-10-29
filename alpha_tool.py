@@ -1285,6 +1285,32 @@ def settle_new_region(checks, alpha_id, cfg):
     return out
 
 
+def settle_prod_error(checks, alpha_id, cfg):
+    """BRAIN's production-correlation test sometimes ERRORs while every other test has finished (P0MgeVwM, EUR,
+    Sharpe 2.71, 2026-10-29: all PASS/WARNING, PROD_CORRELATION ERROR), and the alpha then waited forever. Its
+    value is read directly once; if BRAIN gives none, it counts as passed with `prod_unknown` set: BRAIN computes
+    it again at submission and refuses the alpha there if it is too high (a refusal costs no daily slot)."""
+    from brain import BrainError
+    by = {c["name"]: c for c in checks}
+    if by.get("PROD_CORRELATION", {}).get("result") != "ERROR":
+        return checks
+    if any(c.get("result") in ("FAIL", "PENDING", "ERROR") for c in checks
+           if c["name"] != "PROD_CORRELATION" and c["name"] not in QUOTA_CHECKS):
+        return checks
+    prod = load_prodcorr().get(alpha_id)
+    if prod is None:
+        try:
+            prod = brain().prod_corr(alpha_id)
+            if prod is not None:
+                save_prod_corr({alpha_id: prod})
+        except BrainError:
+            prod = None
+    limit = cfg.get("unique_prod_corr", 0.7)
+    return [c if c["name"] != "PROD_CORRELATION" else
+            {**c, "result": "PASS", "value": None, "limit": limit, "prod_unknown": True} if prod is None else
+            {**c, "result": "PASS" if prod < limit else "FAIL", "value": prod, "limit": limit} for c in checks]
+
+
 def alpha_kind(r, checks):
     """SUPER, POWER_POOL (passes BRAIN's check only as a Power Pool alpha) or REGULAR, for quotas."""
     if r.get("super"):
@@ -1354,6 +1380,7 @@ def verify(alpha_id, cfg, brain_allowed=True):
             log(f"DESCRIPTION for {alpha_id} failed before its check: {str(e)[:120]}")
     checks, correlated = brain().check(alpha_id, max_seconds=cfg.get("check_seconds", 180))
     checks = settle_new_region(checks, alpha_id, cfg)
+    checks = settle_prod_error(checks, alpha_id, cfg)
     prod = next((c.get("value") for c in checks if c["name"] == "PROD_CORRELATION" and c.get("value") is not None), None)
     if prod is not None:
         save_prod_corr({alpha_id: prod})
@@ -1383,6 +1410,8 @@ def verify(alpha_id, cfg, brain_allowed=True):
         details.append(f"{POWER_POOL_TAG} (regular bar not met: {', '.join(below)})")
     if waived:
         details.append(waived)
+    if any(c.get("prod_unknown") for c in checks):
+        details.append("PROD_CORRELATION errored on BRAIN's preview; BRAIN decides at submission")
     return {"alpha_id": alpha_id, "checked_at": now,
             "verdict": "FAIL" if failed else "PASS", "failed": ";".join(failed),
             "self_corr": self_corr, "corr_with": top.get("id", ""),
