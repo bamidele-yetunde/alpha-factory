@@ -580,7 +580,8 @@ class Knowledge:
             choices = [t for t in (slot_templates if explore else templates) if per_template[t] < template_cap]
             if not choices:
                 break
-            template = self.pick("template", allowed("template", choices))
+            # Simpler shapes weigh a little more (alpha_tool sets template_weight; Genius tie-breaker).
+            template = self.pick("template", allowed("template", choices), getattr(self, "template_weight", None))
             names = placeholders(template)
             want = (random.choices(list(shares), weights=list(shares.values()))[0]
                     if shares and ({"field", "vfield"} & names) else None)

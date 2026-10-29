@@ -852,7 +852,7 @@ def write_reports(cfg):
     before = {r["alpha_id"] for r in load_csv(READY)}
     supers = super_candidates()
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
-    ready = pyramid_order(ready, cfg)
+    ready = submission_order(ready, cfg)
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
     # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
@@ -1039,35 +1039,58 @@ def pyramid_counts(cfg):
 
 
 def pyramid_boosts(cfg):
-    """{dataset label: weight} for the idea picker: datasets whose pyramid has 1-2 submissions this quarter get
-    `pyramid_boost` (one or two more alphas there complete a pyramid)."""
+    """{dataset label: weight} for the idea picker, within a region: datasets whose pyramid has 1-2 submissions
+    this quarter get `pyramid_boost` (one or two more alphas complete it), datasets of a pyramid not started yet
+    `pyramid_new_boost`; finished pyramids (3+) keep weight 1. User, 2026-10-29: the typical Expert has 17
+    pyramids, you 3-5, and BRAIN's tip of 28 Oct said "You are not using different Datasets"."""
     counts, cats = pyramid_counts(cfg)
-    boost, delay = cfg.get("pyramid_boost", 1.3), cfg["settings"]["delay"]
+    boost, new, delay = cfg.get("pyramid_boost", 1.3), cfg.get("pyramid_new_boost", 1.15), cfg["settings"]["delay"]
     out = {}
     for ds, region in {(r["dataset"], r.get("region") or "USA") for r in load_csv(FIELDS)}:
         cat = dataset_category(ds, cats)
-        if cat and 1 <= counts.get(f"{region}/D{delay}/{cat.upper()}", 0) < 3:
-            out[ds if region == "USA" else f"{ds}@{region}"] = boost
+        n = counts.get(f"{region}/D{delay}/{cat.upper()}", 0) if cat else 3
+        if n < 3:
+            out[ds if region == "USA" else f"{ds}@{region}"] = boost if n else new
     return out
 
 
-def pyramid_order(ready, cfg):
-    """Quality first (fitness), with a small lift (`pyramid_submit_bonus`, 15%) for a verified alpha that adds to
-    a pyramid with 2 submissions this quarter (half for 1): completing pyramids helps the Genius level."""
+def alpha_shape(expr):
+    """(distinct operators, distinct data fields) of an expression, as BRAIN's Genius tie-breakers count them:
+    ts_backfill and group_backfill are not counted as operators."""
+    import re
+    from learner import fields_in
+    ops = set(re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(", expr.lower())) - {"ts_backfill", "group_backfill"}
+    return len(ops), len(fields_in(expr) - {"true", "false", "nan"})
+
+
+def submission_order(ready, cfg):
+    """Quality first (fitness), lifted or lowered a little for what helps the Genius level (BRAIN docs, "Brain
+    Genius"; user, 2026-10-29):
+    - pyramids: `pyramid_submit_bonus` (15%) for completing one (2 submissions this quarter), half for a second
+      alpha, a quarter for starting a new one;
+    - simplicity: `simple_bonus` (5%) per operator below 4 and per field below 2, the same off above them (the
+      tie-breakers rank fewer operators and fields per alpha higher; typical Expert 3.5 and 1.4), at most 15%;
+    - new fields: `new_field_bonus` (5%) per data field none of your submissions uses, at most 10% (more distinct
+      fields rank higher)."""
     from learner import fields_in, num
     counts, cats = pyramid_counts(cfg)
-    bonus, delay = cfg.get("pyramid_submit_bonus", 0.15), cfg["settings"]["delay"]
-    if not counts or not bonus:
-        return ready
+    delay = cfg["settings"]["delay"]
+    bonus, simple, fresh = (cfg.get("pyramid_submit_bonus", 0.15), cfg.get("simple_bonus", 0.05),
+                            cfg.get("new_field_bonus", 0.05))
     field_ds = {(r["id"], r.get("region") or "USA"): r["dataset"] for r in load_csv(FIELDS)}
+    used = set().union(*(fields_in(s["code"]) for s in load_csv(SUBMITTED) if s.get("code")))
 
     def lift(r):
         s = r.get("settings") or {}
         region = (json.loads(s) if isinstance(s, str) else s).get("region", "USA")
+        fields = fields_in(r["expression"])
         have = [counts.get(f"{region}/D{delay}/{c.upper()}", 0)
-                for c in {dataset_category(field_ds[(f, region)], cats) for f in fields_in(r["expression"])
-                          if (f, region) in field_ds} if c]
-        return bonus if 2 in have else bonus / 2 if 1 in have else 0.0
+                for c in {dataset_category(field_ds[(f, region)], cats) for f in fields if (f, region) in field_ds} if c]
+        p = bonus if 2 in have else bonus / 2 if 1 in have else bonus / 4 if 0 in have else 0.0
+        ops, nf = alpha_shape(r["expression"])
+        sh = max(-0.15, min(0.15, simple * ((4 - ops) + (2 - nf))))
+        nw = min(0.1, fresh * len({f for f in fields if (f, region) in field_ds} - used))
+        return p + sh + nw
     supers = [r for r in ready if r.get("super")]
     rest = sorted((r for r in ready if not r.get("super")), key=lambda r: -num(r["fitness"]) * (1 + lift(r)))
     return supers + rest
@@ -1633,7 +1656,10 @@ def run_cycle(cfg, dry_run=False):
     n_family = round(n_new * cfg.get("family_share", 0.5))
     cfg["_focus_region"] = focus_region(cfg)  # the learner gives it a bigger share of the new ideas
     know_now = knowledge(cfg)
-    know_now.pyramid_boost = pyramid_boosts(cfg)  # pyramids 1-2 alphas short get more of the ideas
+    know_now.pyramid_boost = pyramid_boosts(cfg)  # unfinished pyramids get more of the ideas
+    # Fewer operators per alpha ranks higher in BRAIN's Genius tie-breakers: +-5% per operator around 4.
+    know_now.template_weight = {t: max(0.85, min(1.15, 1 + cfg.get("simple_bonus", 0.05) * (4 - alpha_shape(t)[0])))
+                                for t in templates}
     new = know_now.propose(templates, load_fields(cfg), done_keys(), n_new - n_family,
                            operators=operators, known_fields=field_ids)
     if n_family:

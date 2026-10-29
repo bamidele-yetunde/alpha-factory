@@ -471,6 +471,9 @@
   "focus_fallback_quota": 1,
   "pyramid_boost": 1.3,
   "pyramid_submit_bonus": 0.15,
+  "pyramid_new_boost": 1.15,
+  "simple_bonus": 0.05,
+  "new_field_bonus": 0.05,
   "osmosis": {
     "enabled": true,
     "min_scopes": 3,
