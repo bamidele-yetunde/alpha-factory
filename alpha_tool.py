@@ -774,8 +774,63 @@ def focus_region(cfg):
     region = cfg.get("focus_region")
     if not region:
         return None
+    if region == "auto":
+        return auto_focus_region(cfg)
     n = sum(1 for s in load_csv(SUBMITTED) if (s.get("region") or "USA") == region and s.get("type") != "SUPER")
     return region if n < cfg.get("focus_target", 10) else None
+
+
+_focus_cache = (0.0, None)
+
+
+def auto_focus_region(cfg):
+    """User, 2026-10-29 ("yes"): the focus goes to whichever new region gets passing alphas first, not TWN only
+    (98 TWN in-sample passes, none past BRAIN's check, best Sharpe 1.88). A third region with 10 alphas makes
+    Osmosis valid (1-2x base pay) and allows SuperAlphas there. Among enabled regions below `focus_target`
+    submissions (not IND, already a scope): score = 3 x submitted + 2 x verified waiting + 0.1 x strong in-sample
+    passes (Sharpe >= 1.58, fitness >= 1). Recomputed every 10 minutes; a change is logged and sent once."""
+    import time
+    global _focus_cache
+    if time.time() - _focus_cache[0] < 600:
+        return _focus_cache[1]
+    from learner import num
+    target = cfg.get("focus_target", 10)
+    subs = load_csv(SUBMITTED)
+    submitted = Counter((s.get("region") or "USA") for s in subs if s.get("type") != "SUPER")
+    done = {s["id"] for s in subs}
+    candidates = [g for g in cfg.get("regions", {}) if submitted[g] < target and g not in cfg.get("focus_skip", ["IND"])]
+    if not candidates:
+        _focus_cache = (time.time(), None)
+        return None
+    latest = {}
+    for c in load_csv(CHECKS):
+        latest[c["alpha_id"]] = c["verdict"]
+    verified, strong = Counter(), Counter()
+    for r in load_csv(RESULTS):
+        if not r["alpha_id"] or r["alpha_id"] in done:
+            continue
+        g = json.loads(r["settings"] or "{}").get("region", "USA")
+        if g not in candidates:
+            continue
+        if latest.get(r["alpha_id"]) == "PASS":
+            verified[g] += 1
+        if r["passed"] == "True" and num(r["sharpe"]) >= 1.58 and num(r["fitness"]) >= 1.0:
+            strong[g] += 1
+    score = {g: 3 * submitted[g] + 2 * verified[g] + 0.1 * strong[g] for g in candidates}
+    state = load_notified()
+    previous = state.get("auto_focus")
+    best = max(candidates, key=lambda g: (score[g], g == previous))  # ties keep the current focus
+    if best != previous:
+        log(f"FOCUS REGION: {best} (score {score[best]:.1f}: {submitted[best]} submitted, {verified[best]} verified "
+            f"waiting, {strong[best]} strong in-sample passes); was {previous or 'none'}. Scores: "
+            + ", ".join(f"{g} {s:.1f}" for g, s in sorted(score.items(), key=lambda kv: -kv[1])[:5]))
+        from notify import esc, telegram
+        telegram(f"🎯 Focus region now {esc(best)} ({submitted[best]}/{target} submitted, {verified[best]} verified "
+                 f"waiting). Regular slots go to it first; at {target} alphas Osmosis can start.")
+        state["auto_focus"] = best
+        save_notified(state)
+    _focus_cache = (time.time(), best)
+    return best
 
 
 def focus_fallback_room(cfg, focus):
