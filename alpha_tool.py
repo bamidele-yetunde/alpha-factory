@@ -436,6 +436,9 @@ def verify_super(row, cfg):
     blocked = corr is not None and corr >= cfg.get("super", {}).get("self_corr_limit", 0.8)
     sharpes, problems = robustness(alpha_id, cfg)
     row["self_corr"], row["corr_with"] = (round(corr, 4) if corr is not None else ""), closest
+    twin = super_twin(row, cfg)
+    if twin and not blocked:
+        blocked, corr, closest = True, twin[1], twin[0]
     if not blocked and not problems and super_prod_gate(row, cfg) != "ok":
         _update_super(row)
         return
@@ -464,11 +467,31 @@ def verify_super(row, cfg):
     log(f"  SUPER {alpha_id}: PASS ({row['verify_detail']}); BRAIN decides self-correlation at submission")
 
 
+def super_twin(row, cfg):
+    """The submitted SuperAlpha of the same region that `row` copies, or None. BRAIN refuses a SuperAlpha at 0.7
+    self-correlation with your SuperAlphas unless its Sharpe is 10% higher (2026-10-29: MP0NGpEr 0.714 and
+    1YjMEMGW 0.739 refused; Sharpe 3.52 and 3.71 against 3.49). Our PnL measure reads up to 0.1 lower than
+    BRAIN's (VkdW9n8V: 0.618 here, 0.712 there), hence the margin in `super.super_corr_limit`."""
+    from learner import num
+    region = json.loads(row.get("settings") or "{}").get("region", "USA")
+    limit = cfg.get("super", {}).get("super_corr_limit", 0.68)
+    book, mine = pnl_book(), num(row.get("sharpe"), 0)
+    for s in load_csv(SUBMITTED):
+        if s.get("type") != "SUPER" or (s.get("region") or "USA") != region or s["id"] == row["alpha_id"]:
+            continue
+        c = book.corr(row["alpha_id"], s["id"])
+        if c is not None and c >= limit and mine < 1.1 * num(s.get("sharpe"), 0):
+            return s["id"], c
+    return None
+
+
 def super_direct_submit(cfg):
     """User, 2026-10-25: the SuperAlpha comes first every day. When today's SuperAlpha slot is still empty, submit
     the most promising candidate waiting on BRAIN (no production correlation available: BRAIN's correlation
     service gave nothing all day on 2026-10-25 while 16 candidates waited) and let BRAIN decide; a refusal does
-    not use the slot. One per round; each candidate is tried once (`super_submit_tried` in notified.json)."""
+    not use the slot. Up to `super.submit_tries_per_round` per round; each candidate is tried once
+    (`super_submit_tried` in notified.json). Copies of your SuperAlphas are dropped, and production correlation is
+    measured first when BRAIN gives it, so only candidates with a real chance are sent (2026-10-29)."""
     if not cfg.get("auto_submit") or submitted_today()["SUPER"] >= cfg.get("super_daily_quota", 1):
         return
     import superalpha as SA
@@ -478,16 +501,31 @@ def super_direct_submit(cfg):
     state = load_notified()
     tried = set(state.get("super_submit_tried", []))
     subs = {s["id"] for s in load_csv(SUBMITTED)}
-    book, sas = pnl_book(), [s["id"] for s in load_csv(SUBMITTED) if s.get("type") == "SUPER"]
     unique_first = ("ultra_unique", "low_prod_corr", "unique_only", "unique_lowturn", "balanced_low_corr")
     cands = [r for r in SA.load() if r["verdict"] in ("CHECKING", "PASS") and r["alpha_id"]
              and r["alpha_id"] not in tried and r["alpha_id"] not in subs and not r.get("error")]
-    cands.sort(key=lambda r: (not r["recipe"].startswith(unique_first), -float(r["fitness"] or 0)))
-    for row in cands[:5]:
-        corrs = [c for c in (book.corr(row["alpha_id"], o) for o in sas) if c is not None]
-        if corrs and max(corrs) >= cfg.get("super", {}).get("self_corr_limit", 0.8):
-            continue  # a copy of one of your SuperAlphas
+    # Measured below 0.7 production correlation first, then the unique selections, then fitness.
+    cands.sort(key=lambda r: ("measured" not in (r.get("verify_detail") or ""),
+                              not r["recipe"].startswith(unique_first), -float(r["fitness"] or 0)))
+    # A refusal costs nothing but the round, so up to `super.submit_tries_per_round` candidates are tried.
+    tries = cfg.get("super", {}).get("submit_tries_per_round", 2)
+    for row in cands[:10]:
+        if tries <= 0:
+            return
+        twin = super_twin(row, cfg)
+        if twin:
+            row["verdict"], row["verify_detail"] = "FAIL", f"SELF_CORRELATION {twin[1]:.3f} with SuperAlpha {twin[0]}"
+            _update_super(row)
+            log(f"  SUPER {row['alpha_id']}: not submitted, {row['verify_detail']} (BRAIN refuses from 0.7)")
+            continue  # a copy of one of your SuperAlphas: BRAIN would refuse it
         aid = row["alpha_id"]
+        if "measured" not in (row.get("verify_detail") or ""):
+            # 2026-10-29: four refusals at production correlation 0.74-0.79 were never measured beforehand.
+            if super_prod_gate(row, cfg) == "fail":
+                _update_super(row)
+                continue
+            _update_super(row)
+        tries -= 1
         tried.add(aid)
         state["super_submit_tried"] = sorted(tried)
         save_notified(state)
@@ -514,7 +552,8 @@ def super_direct_submit(cfg):
             row["verdict"], row["verify_detail"] = "FAIL", f"refused by BRAIN on submission: {', '.join(bad)}"
             _update_super(row)
             log(f"AUTO-SUBMIT {aid}: SuperAlpha refused by BRAIN ({', '.join(bad) or 'no reason given'}); "
-                "the next candidate is tried next round")
+                "trying the next candidate")
+            continue
         return
 
 

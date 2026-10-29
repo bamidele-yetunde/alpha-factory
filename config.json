@@ -219,11 +219,14 @@
   ],
   "novelty_per_round": 25,
   "super": {
-    "per_cycle": 2,
+    "per_cycle": 3,
     "neutralizations": [
       "CROWDING",
       "STATISTICAL",
-      "SLOW_AND_FAST"
+      "SLOW_AND_FAST",
+      "FAST",
+      "SLOW",
+      "REVERSION_AND_MOMENTUM"
     ],
     "decays": [
       4,
@@ -235,7 +238,9 @@
     "min_region_alphas": 10,
     "check_seconds": 60,
     "self_corr_limit": 0.8,
-    "prod_gate_per_round": 6
+    "prod_gate_per_round": 6,
+    "super_corr_limit": 0.68,
+    "submit_tries_per_round": 2
   },
   "sim_reserve": 100,
   "rules_since": "2026-10-18T00:00:00",

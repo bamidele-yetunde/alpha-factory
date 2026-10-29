@@ -17,7 +17,7 @@ import csv
 import json
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -59,6 +59,12 @@ SELECTIONS = [
     ("rank_low_turnover", "1 - turnover", "POSITIVE", "the slowest-trading components"),
     ("rank_low_self_corr", "1 - self_correlation", "POSITIVE", "the components least like the rest of my pool"),
     ("rank_low_prod_corr", "1 - prod_correlation", "POSITIVE", "the components least like the production pool"),
+    # 2026-10-29: every new SuperAlpha was refused at 0.71-0.94 self-correlation with an earlier one, because each
+    # picks mostly the same components. The most recently submitted alphas are the ones no SuperAlpha holds yet.
+    ("rank_recent", "os_start_date * (turnover < 0.4)", "POSITIVE",
+     "the most recently submitted components with tradable turnover"),
+    ("recent_unique", "os_start_date * (prod_correlation < 0.6)", "POSITIVE",
+     "the most recent components that are clearly unlike the production pool"),
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
 SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10",  # RRA2Ppxb, 2026-10-18
@@ -138,6 +144,14 @@ def plan(cfg, region_categories, n):
     best Sharpe it has reached so far plus an exploration bonus for parts with few tries, so the bot moves towards
     what works for this pool without stopping to explore."""
     done = {r["recipe"] for r in load()} | SUBMITTED_RECIPES
+    # A selection that left fewer than BRAIN's minimum of 10 components in a region (74 IND tries on 2026-10-29)
+    # is skipped there for a week, until the region's pool has grown.
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    skip = {(r["recipe"].split("|")[0], (r["recipe"].split("|") + ["USA"] * 6)[5]) for r in load()
+               if "At least 10 component" in (r["error"] or "") and r["created"] >= week_ago}
+    # Any other simulation error means BRAIN rejects the expression itself: never try that selection again there.
+    skip |= {(r["recipe"].split("|")[0], (r["recipe"].split("|") + ["USA"] * 6)[5]) for r in load()
+                if r["error"] and "At least 10 component" not in r["error"] and "busy" not in r["error"].lower()}
     stats = {}
     # A part's value is the Sharpe it reached, discounted by what BRAIN's checks said: a high Sharpe that fails
     # production correlation is worth little, a verified pass is worth full value.
@@ -148,13 +162,22 @@ def plan(cfg, region_categories, n):
         value = float(r["sharpe"]) * (0.25 if r["failed_checks"] else weight.get(r["verdict"], 0.6))
         for part in r["recipe"].split("|"):
             stats.setdefault(part, []).append(value)
+    # An untried part (e.g. a new neutralisation) is valued like the best part in its position, so it is
+    # tried soon; with a fixed 1.2 the proven parts (Sharpe 4+) kept it out for good (2026-10-29).
+    best_at = {}
+    for r in load():
+        for i, part in enumerate(r["recipe"].split("|")):
+            if stats.get(part):
+                best_at[i] = max(best_at.get(i, 0), max(stats[part]))
+
     def score(rec):
         s = 0.0
-        for part in rec["recipe"].split("|"):
+        for i, part in enumerate(rec["recipe"].split("|")):
             v = stats.get(part, [])
-            s += (max(v) if v else 1.2) + 0.6 / (1 + len(v)) ** 0.5 + random.random() * 0.2
+            s += (max(v) if v else best_at.get(i, 1.2)) + 0.6 / (1 + len(v)) ** 0.5 + random.random() * 0.2
         return s
-    todo = [r for r in recipes(cfg, region_categories) if r["recipe"] not in done]
+    todo = [r for r in recipes(cfg, region_categories) if r["recipe"] not in done
+            and (r["recipe"].split("|")[0], r["settings"].get("region", "USA")) not in skip]
     todo.sort(key=score, reverse=True)
     # At most one recipe per selection in a round, so each round explores different component sets.
     out, seen = [], set()
