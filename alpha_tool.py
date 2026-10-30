@@ -370,6 +370,7 @@ def run_super_round(cfg, jobs=None):
         # BRAIN's preview never finishes: verify again, which now decides by measured production correlation
         # (and attaches the descriptions); BRAIN decides the rest on submission.
         verify_super(row, cfg)
+    requeue_super_exceptions(cfg)
     if stuck:
         log(f"  SUPER: {len(stuck)} SuperAlpha checks still computing on BRAIN; up to "
             f"{cfg.get('super', {}).get('prod_gate_per_round', 6)} settled by production correlation this round")
@@ -433,12 +434,13 @@ def verify_super(row, cfg):
     alpha_id = row["alpha_id"]
     corr, closest, _ = corr_screen(alpha_id, cfg)
     # BRAIN passed SuperAlpha E5VMPvrL's self-correlation at 0.776 (2026-10-24), so 0.7 was stricter than BRAIN.
-    blocked = corr is not None and corr >= cfg.get("super", {}).get("self_corr_limit", 0.8)
     sharpes, problems = robustness(alpha_id, cfg)
     row["self_corr"], row["corr_with"] = (round(corr, 4) if corr is not None else ""), closest
+    # Copies are judged by super_twin, which applies BRAIN's 10%-higher-Sharpe exception (2026-10-30).
     twin = super_twin(row, cfg)
-    if twin and not blocked:
-        blocked, corr, closest = True, twin[1], twin[0]
+    blocked = twin is not None
+    if twin:
+        corr, closest = twin[1], twin[0]
     if not blocked and not problems and super_prod_gate(row, cfg) != "ok":
         _update_super(row)
         return
@@ -471,18 +473,44 @@ def super_twin(row, cfg):
     """The submitted SuperAlpha of the same region that `row` copies, or None. BRAIN refuses a SuperAlpha at 0.7
     self-correlation with your SuperAlphas unless its Sharpe is 10% higher (2026-10-29: MP0NGpEr 0.714 and
     1YjMEMGW 0.739 refused; Sharpe 3.52 and 3.71 against 3.49). Our PnL measure reads up to 0.1 lower than
-    BRAIN's (VkdW9n8V: 0.618 here, 0.712 there), hence the margin in `super.super_corr_limit`."""
+    BRAIN's (VkdW9n8V: 0.618 here, 0.712 there), hence the margin in `super.super_corr_limit`.
+    BRAIN's exception applies to SuperAlphas too: E5VMPvrL passed at 0.776 with 88l2wwbo because its Sharpe 3.72
+    was over 1.1 x 3.05. So a candidate is only a copy when its Sharpe is below 1.1 x (plus a 0.02 margin) that of
+    the alpha it resembles. Regular alphas count from `super.self_corr_limit` 0.8, as before."""
     from learner import num
     region = json.loads(row.get("settings") or "{}").get("region", "USA")
-    limit = cfg.get("super", {}).get("super_corr_limit", 0.68)
+    sc = cfg.get("super", {})
     book, mine = pnl_book(), num(row.get("sharpe"), 0)
     for s in load_csv(SUBMITTED):
-        if s.get("type") != "SUPER" or (s.get("region") or "USA") != region or s["id"] == row["alpha_id"]:
+        if (s.get("region") or "USA") != region or s["id"] == row["alpha_id"]:
             continue
+        limit = sc.get("super_corr_limit", 0.68) if s.get("type") == "SUPER" else sc.get("self_corr_limit", 0.8)
         c = book.corr(row["alpha_id"], s["id"])
-        if c is not None and c >= limit and mine < 1.1 * num(s.get("sharpe"), 0):
+        if c is not None and c >= limit and mine < 1.1 * num(s.get("sharpe"), 0) + 0.02:
             return s["id"], c
     return None
+
+
+def requeue_super_exceptions(cfg):
+    """Once (2026-10-30): SuperAlphas failed only for self-correlation before the Sharpe exception was applied go
+    back to CHECKING when it now clears them, e.g. 17 IND ones with Sharpe 5.4-5.7 against YPxeQew6's 4.85."""
+    import superalpha as SA
+    state = load_notified()
+    if state.get("super_exception_requeue"):
+        return
+    back = []
+    for row in SA.load():
+        d = row.get("verify_detail") or ""
+        if (row["verdict"] == "FAIL" and row["alpha_id"] and d.startswith("SELF_CORRELATION")
+                and "exact PnL check" in d and "NOT_ROBUST" not in d and super_twin(row, cfg) is None):
+            row["verdict"], row["verify_detail"] = "CHECKING", ""
+            _update_super(row)
+            back.append(f"{row['alpha_id']} ({row['sharpe']})")
+    log(f"  SUPER: {len(back)} SuperAlphas back in the queue under BRAIN's 10%-higher-Sharpe exception: "
+        + ", ".join(back[:20]))
+    state = load_notified()
+    state["super_exception_requeue"] = True
+    save_notified(state)
 
 
 def super_direct_submit(cfg):
@@ -504,9 +532,10 @@ def super_direct_submit(cfg):
     unique_first = ("ultra_unique", "low_prod_corr", "unique_only", "unique_lowturn", "balanced_low_corr")
     cands = [r for r in SA.load() if r["verdict"] in ("CHECKING", "PASS") and r["alpha_id"]
              and r["alpha_id"] not in tried and r["alpha_id"] not in subs and not r.get("error")]
-    # Measured below 0.7 production correlation first, then the unique selections, then fitness.
-    cands.sort(key=lambda r: ("measured" not in (r.get("verify_detail") or ""),
-                              not r["recipe"].startswith(unique_first), -float(r["fitness"] or 0)))
+    # Measured below 0.7 production correlation first, then the highest Sharpe (the margin for BRAIN's
+    # 10%-higher-Sharpe exception), then the unique selections.
+    cands.sort(key=lambda r: ("measured" not in (r.get("verify_detail") or ""), -float(r["sharpe"] or 0),
+                              not r["recipe"].startswith(unique_first)))
     # A refusal costs nothing but the round, so up to `super.submit_tries_per_round` candidates are tried.
     tries = cfg.get("super", {}).get("submit_tries_per_round", 2)
     for row in cands[:10]:
