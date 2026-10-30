@@ -487,5 +487,11 @@
     "max_corr": 0.7,
     "points": 100000,
     "every_hours": 24
+  },
+  "region_build": {
+    "IND": {
+      "daily": 3,
+      "until": 20
+    }
   }
 }

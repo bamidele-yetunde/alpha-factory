@@ -697,20 +697,30 @@ def auto_submit(ready, cfg):
     # Regular and Power Pool share BRAIN's 4 a day: regular alphas first, Power Pool only if none is waiting.
     # User, 2026-10-23: SuperAlpha first, then Power Pool, then regular alphas.
     order = {"SUPER": 0, "POWER_POOL": 1, "REGULAR": 2}
-    region_of_alpha = {r["alpha_id"]: alpha_region(r["alpha_id"]) for r in ready} if focus else {}
-    # The focus region's regular alphas before any other region's (those only fill the evening fallback slot).
+    build, build_used = build_room(cfg)
+    region_of_alpha = {r["alpha_id"]: alpha_region(r["alpha_id"]) for r in ready} if focus or build else {}
+    # The focus region's regular alphas before any other region's (those only fill the evening fallback slot
+    # and the `region_build` slots).
+    def region_rank(aid):
+        reg = region_of_alpha.get(aid)
+        return 0 if not focus or reg == focus else 1 if build.get(reg, 0) > 0 else 2
     ready = sorted(ready, key=lambda r: (order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 2),
-                                         bool(focus) and region_of_alpha.get(r["alpha_id"]) != focus))
+                                         region_rank(r["alpha_id"])))
     fallback = focus_fallback_room(cfg, focus)
+    used["REGULAR"] -= build_used  # region_build submissions have their own slots
     for r in ready:
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
         aid = r["alpha_id"]
-        shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] >= shared
-        if used[kind] >= quota[kind] or shared_full or tried.get(aid) == today:
+        # Regular alphas leave today's Power Pool slot free (user's plan: 1 SuperAlpha, 1 Power Pool, 1 regular).
+        pp_left = max(0, quota["POWER_POOL"] - used["POWER_POOL"]) if kind == "REGULAR" else 0
+        shared_full = kind != "SUPER" and used["REGULAR"] + used["POWER_POOL"] + build_used >= shared - pp_left
+        region = region_of_alpha.get(aid) or alpha_region(aid)
+        building = kind == "REGULAR" and build.get(region, 0) > 0
+        if (used[kind] >= quota[kind] and not building) or shared_full or tried.get(aid) == today:
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
-        other_region = kind == "REGULAR" and focus and region_of_alpha.get(aid, alpha_region(aid)) != focus
+        other_region = kind == "REGULAR" and focus and region != focus and not building
         if other_region and fallback <= 0:
             continue  # building the focus region's pool to 10 for its SuperAlphas
         if kind == "REGULAR" and not regular_window(cfg):
@@ -752,12 +762,17 @@ def auto_submit(ready, cfg):
             telegram(f"⚠️ Could not submit {code(aid)}: {esc(str(e)[:150])}")
             continue
         if alpha.get("stage") == "OS":
-            used[kind] += 1
+            if building:
+                build[region] -= 1
+                build_used += 1
+            else:
+                used[kind] += 1
             fallback -= 1 if other_region else 0
             submitted_any = True
             st = alpha.get("is") or {}
             counts = (f"{used['SUPER']}/{quota['SUPER']} SuperAlpha, {used['POWER_POOL']}/{quota['POWER_POOL']} "
-                      f"Power Pool, {used['REGULAR']}/{quota['REGULAR']} regular")
+                      f"Power Pool, {used['REGULAR']}/{quota['REGULAR']} regular"
+                      + (f", {build_used} pool-building ({', '.join(build)})" if build else ""))
             log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
                 f"today {counts}")
             name = {"SUPER": "SuperAlpha", "POWER_POOL": "Power Pool alpha"}.get(kind, "alpha")
@@ -921,6 +936,23 @@ def focus_fallback_room(cfg, focus):
     return max(0, cfg.get("focus_fallback_quota", 1) - used)
 
 
+def build_room(cfg):
+    """User, 2026-10-30 ("yes"): grow a region's pool for new SuperAlphas. Each region in `region_build`
+    ({"IND": {"daily": 3, "until": 20}}) may submit up to `daily` regular alphas a day, outside the focus-region
+    rule and the 1-a-day regular quota, until it has `until` submitted regular alphas. Every one still has to
+    pass all checks. Returns ({region: slots left today}, regular alphas submitted today in those regions)."""
+    today, room, used_today = brain_today(), {}, 0
+    subs = [s for s in load_csv(SUBMITTED) if s.get("type", "REGULAR") == "REGULAR"]
+    for region, rule in (cfg.get("region_build") or {}).items():
+        mine = [s for s in subs if (s.get("region") or "USA") == region]
+        n_today = sum(1 for s in mine if (s.get("submitted_at") or "")[:10] == today)
+        used_today += n_today
+        # The day's slots stay open even when today's submissions reach the target.
+        if len(mine) - n_today < rule.get("until", 20):
+            room[region] = max(0, rule.get("daily", 3) - n_today)
+    return room, used_today
+
+
 def regular_quota(cfg):
     return cfg.get("focus_regular_quota", 4) if focus_region(cfg) else cfg.get("regular_daily_quota", 1)
 
@@ -989,15 +1021,26 @@ def write_reports(cfg):
     pool_room = 0 if not power_pool_window(cfg) else min(
         max(0, cfg.get("power_pool_daily_quota", 4) - used["POWER_POOL"]), shared_room)
     focus = focus_region(cfg)
+    # `region_build` (user, 2026-10-30): up to 3 IND regular alphas a day on their own slots.
+    build, build_used = build_room(cfg)
+    room_left = dict(build)
+    building = set()
+    for r in ready:
+        reg = alpha_region(r["alpha_id"]) if alpha_kind(r, know.checks) == "REGULAR" else None
+        if room_left.get(reg, 0) > 0:
+            room_left[reg] -= 1
+            building.add(r["alpha_id"])
     if focus:  # only the focus region's regular alphas until it has enough for SuperAlphas
         others = [r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "REGULAR"
-                  and alpha_region(r["alpha_id"]) != focus]
+                  and alpha_region(r["alpha_id"]) != focus and r["alpha_id"] not in building]
         held = set(others[focus_fallback_room(cfg, focus):])  # the best one(s) take the evening fallback slot
         ready = [r for r in ready if r["alpha_id"] not in held]
         backups.update({h: (0.0, f"today's quota of {focus}-only regular alphas") for h in held})
     regular_room = 0 if not regular_window(cfg) else min(
         max(0, shared_room - min(len(pool_ready), pool_room)),
-        max(0, regular_quota(cfg) - used["REGULAR"]))
+        max(0, regular_quota(cfg) - (used["REGULAR"] - build_used)) + len(building))
+    # Pool-building alphas first among regular ones, so the quota trim below keeps them.
+    ready.sort(key=lambda r: alpha_kind(r, know.checks) == "REGULAR" and r["alpha_id"] not in building)
     for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
         same = [r for r in ready if alpha_kind(r, know.checks) == kind]
         if len(same) > room:
