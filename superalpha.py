@@ -59,12 +59,8 @@ SELECTIONS = [
     ("rank_low_turnover", "1 - turnover", "POSITIVE", "the slowest-trading components"),
     ("rank_low_self_corr", "1 - self_correlation", "POSITIVE", "the components least like the rest of my pool"),
     ("rank_low_prod_corr", "1 - prod_correlation", "POSITIVE", "the components least like the production pool"),
-    # 2026-10-29: every new SuperAlpha was refused at 0.71-0.94 self-correlation with an earlier one, because each
-    # picks mostly the same components. The most recently submitted alphas are the ones no SuperAlpha holds yet.
-    ("rank_recent", "os_start_date * (turnover < 0.4)", "POSITIVE",
-     "the most recently submitted components with tradable turnover"),
-    ("recent_unique", "os_start_date * (prod_correlation < 0.6)", "POSITIVE",
-     "the most recent components that are clearly unlike the production pool"),
+    # 2026-10-30: selections by os_start_date (newest components) were refused by BRAIN: "os_start_date only
+    # allows comparison operators", so ranking by it is impossible.
 ]
 # Recipes already submitted as SuperAlphas (never re-test them: they would only copy the submission).
 SUBMITTED_RECIPES = {"net_long_decay|combo_a_30_scaled|STATISTICAL|d4|n10",  # RRA2Ppxb, 2026-10-18
