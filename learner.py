@@ -176,19 +176,30 @@ def prod_factor(row):
     return max(0.2, min(1.0, 1 - (num(pc) - 0.6) * 4))
 
 
+def margin_factor(row):
+    """Steers the search towards alphas likely to keep more profit after trading costs (user, 2026-11-03):
+    full credit from 15 bps of margin, 0.8 from 5 bps or if unknown, 0.5 below that. A negative margin counts
+    by its size, because a repair may flip the signal."""
+    if row.get("margin") in (None, ""):
+        return 0.8
+    bps = abs(num(row["margin"])) * 10000
+    return 1.0 if bps >= 15 else 0.8 if bps >= 5 else 0.5
+
+
 def reward(row):
     """1 for a verified regular pass, 0.7 for a Power Pool pass, up to 0.6 for an unverified one by how close
     it is to the regular bar, 0.15 for one that failed the correlation/robustness gate, otherwise up to 0.6
     for how close Sharpe (1.58) and fitness (1.0) got. Short of a verified pass, scaled down when its bet
-    copies a submission (novelty) or the production pool (prod_factor)."""
+    copies a submission (novelty) or the production pool (prod_factor). All scaled by margin_factor."""
+    m = margin_factor(row)
     if row["passed"] == "True":
-        return 0.7 if row.get("power_pool") else 1.0
+        return (0.7 if row.get("power_pool") else 1.0) * m
     closeness = max(0.0, min(1.0, abs(num(row["sharpe"])) / REGULAR_SHARPE, abs(num(row["fitness"])) / 1.0))
     if row["passed"] == "Pending":
-        return 0.6 * max(0.3, closeness) * novelty_factor(row) * prod_factor(row)
+        return 0.6 * max(0.3, closeness) * novelty_factor(row) * prod_factor(row) * m
     if set(row["failed_checks"].split(";")) & GATE_CHECKS:
         return 0.15 * prod_factor(row)
-    return 0.6 * closeness * novelty_factor(row) * prod_factor(row)
+    return 0.6 * closeness * novelty_factor(row) * prod_factor(row) * m
 
 
 def components(row):

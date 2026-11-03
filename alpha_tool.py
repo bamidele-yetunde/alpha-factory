@@ -698,14 +698,22 @@ def auto_submit(ready, cfg):
     # User, 2026-10-23: SuperAlpha first, then Power Pool, then regular alphas.
     order = {"SUPER": 0, "POWER_POOL": 1, "REGULAR": 2}
     build, build_used = build_room(cfg)
-    region_of_alpha = {r["alpha_id"]: alpha_region(r["alpha_id"]) for r in ready} if focus or build else {}
+    theme = theme_region(cfg)
+    region_of_alpha = {r["alpha_id"]: alpha_region(r["alpha_id"]) for r in ready} if focus or build or theme else {}
     # The focus region's regular alphas before any other region's (those only fill the evening fallback slot
     # and the `region_build` slots).
     def region_rank(aid):
         reg = region_of_alpha.get(aid)
         return 0 if not focus or reg == focus else 1 if build.get(reg, 0) > 0 else 2
+    def theme_rank(r):  # the Power Pool slot goes to the prize theme's region first
+        kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
+        return 0 if kind == "POWER_POOL" and region_of_alpha.get(r["alpha_id"]) == theme else 1
+    evening = et_hour() >= (cfg.get("value_rank") or {}).get("close_after_hour_et", 16)
+    prod_now = load_prodcorr()
+    tier_rank = {"TOP": 0, "CLOSE": 1, "WEAK": 2}
     ready = sorted(ready, key=lambda r: (order.get(r.get("kind") or ("SUPER" if r.get("super") else "REGULAR"), 2),
-                                         region_rank(r["alpha_id"])))
+                                         region_rank(r["alpha_id"]), theme_rank(r),
+                                         tier_rank[value_tier(r, cfg, prod_now)]))
     fallback = focus_fallback_room(cfg, focus)
     used["REGULAR"] -= build_used  # region_build submissions have their own slots
     for r in ready:
@@ -720,6 +728,13 @@ def auto_submit(ready, cfg):
             continue
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
+        tier = value_tier(r, cfg, prod_now)
+        if tier == "WEAK":
+            continue
+        if tier == "CLOSE" and not evening:
+            continue  # a TOP alpha may still turn up today; this one takes the slot in the evening if not
+        if kind == "POWER_POOL" and theme and region != theme and not evening:
+            continue  # the prize theme's region gets the day first
         other_region = kind == "REGULAR" and focus and region != focus and not building
         if other_region and fallback <= 0:
             continue  # building the focus region's pool to 10 for its SuperAlphas
@@ -773,10 +788,10 @@ def auto_submit(ready, cfg):
             counts = (f"{used['SUPER']}/{quota['SUPER']} SuperAlpha, {used['POWER_POOL']}/{quota['POWER_POOL']} "
                       f"Power Pool, {used['REGULAR']}/{quota['REGULAR']} regular"
                       + (f", {build_used} pool-building ({', '.join(build)})" if build else ""))
-            log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
+            log(f"AUTO-SUBMIT {aid}: SUBMITTED ({kind}, {tier}, Sharpe {st.get('sharpe')}, fitness {st.get('fitness')}); "
                 f"today {counts}")
             name = {"SUPER": "SuperAlpha", "POWER_POOL": "Power Pool alpha"}.get(kind, "alpha")
-            telegram(f"📤 SUBMITTED {name} {code(aid)}\n"
+            telegram(f"📤 SUBMITTED {name} {code(aid)}{'' if kind == 'SUPER' else ' (value: ' + tier + ')'}\n"
                      f"Sharpe {esc(st.get('sharpe'))} | Fitness {esc(st.get('fitness'))} | "
                      f"Self-corr {esc(r.get('self_corr'))}\n"
                      f"Today: {esc(counts)}")
@@ -1007,7 +1022,9 @@ def write_reports(cfg):
     before = {r["alpha_id"] for r in load_csv(READY)}
     supers = super_candidates()
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
-    ready = submission_order(ready, cfg)
+    weak = {r["alpha_id"] for r in ready if value_tier(r, cfg) == "WEAK"}
+    ready = submission_order([r for r in ready if r["alpha_id"] not in weak], cfg)
+    backups.update({a: (0.0, "margin too low to be worth a slot") for a in weak})
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
     # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
@@ -1076,6 +1093,13 @@ def write_reports(cfg):
             log(f"READY TO SUBMIT: {r['alpha_id']} added (sharpe={r['sharpe']} fitness={r['fitness']} "
                 f"self-corr={r['self_corr']}; basket now {len(ready)}) {r['expression']} {r['settings']}")
             risk = f"\n⚠️ RISKY: {esc(r['risky'])}" if r.get("risky") else ""
+            if not r.get("super") and value_tier(r, cfg) == "TOP":
+                from learner import num
+                bps, pc = num(r.get("margin")) * 10000, load_prodcorr().get(r["alpha_id"])
+                log(f"HIGH VALUE: {r['alpha_id']} margin {bps:.1f} bps, production correlation {pc}")
+                telegram(f"\U0001F48E HIGH-VALUE ALPHA FOUND: {code(r['alpha_id'])}\n"
+                         f"Margin {bps:.1f} bps | Production correlation {esc(pc)} | "
+                         f"Sharpe {esc(r['sharpe'])} | Fitness {esc(r['fitness'])}")
             # With auto_submit the bot submits these itself and reports 📤 SUBMITTED, so no "new pass" alert.
             (telegram if not cfg.get("auto_submit") else (lambda *a: None))("\n".join([
                 (f"\U0001F31F NEW SUPER ALPHA PASS: {code(r['alpha_id'])} (descriptions attached)" if r.get("super")
@@ -1111,12 +1135,12 @@ def write_reports(cfg):
     with READY.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["alpha_id", "family", "best_in_family", "risky", "sharpe", "fitness", "turnover",
-                         "self_corr", "yearly_sharpe", "verified_at", "expression", "settings", "type"])
+                         "self_corr", "yearly_sharpe", "verified_at", "expression", "settings", "type", "value"])
         for n, r in enumerate(ready, 1):
             check = know.checks.get(r["alpha_id"]) or {"yearly_sharpe": "", "checked_at": r.get("checked_at", "")}
             writer.writerow([r["alpha_id"], n, "yes", r["risky"], r["sharpe"], r["fitness"], r["turnover"],
                              r["self_corr"], check["yearly_sharpe"], check["checked_at"], r["expression"],
-                             r["settings"], alpha_kind(r, know.checks)])
+                             r["settings"], alpha_kind(r, know.checks), value_tier(r, cfg)])
     pnl_book().save()
     if ready and cfg.get("auto_submit"):
         for r in ready:
@@ -1229,6 +1253,43 @@ def alpha_shape(expr):
     return len(ops), len(fields_in(expr) - {"true", "false", "nan"})
 
 
+def et_hour():
+    """Current hour on BRAIN's clock (US Eastern)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).hour
+    except Exception:
+        from datetime import timedelta, timezone
+        return datetime.now(timezone(timedelta(hours=-4))).hour
+
+
+def value_tier(r, cfg, prod=None):
+    """How much an alpha is likely to be worth, not just whether it passes (user, 2026-11-03).
+    TOP: margin >= `top_margin_bps` and production correlation known and under `top_prod_corr`: submit at once.
+    CLOSE: anything else that passes: waits until `close_after_hour_et`, so a TOP alpha can take the slot first.
+    WEAK: margin under `weak_margin_bps`: not submitted, even if it passes. (Near-copies are already taken out
+    by build_basket.) SuperAlphas have no margin in supers.csv, so they keep their own rules. The limits are a
+    starting point, to be adjusted once real pay and out-of-sample results are tracked."""
+    from learner import num
+    vr = cfg.get("value_rank") or {}
+    if not vr.get("enabled") or r.get("super"):
+        return "TOP"
+    margin = r.get("margin")
+    bps = num(margin) * 10000 if margin not in (None, "") else None
+    if bps is not None and bps < vr.get("weak_margin_bps", 5):
+        return "WEAK"
+    pc = (load_prodcorr() if prod is None else prod).get(r["alpha_id"])
+    if bps is not None and bps >= vr.get("top_margin_bps", 15) and pc is not None and pc < vr.get("top_prod_corr", 0.7):
+        return "TOP"
+    return "CLOSE"
+
+
+def theme_region(cfg):
+    """Region of the Power Pool prize theme still running (`power_pool_theme`), else None."""
+    theme = cfg.get("power_pool_theme") or {}
+    return theme.get("region") if theme.get("until", "") >= brain_today() else None
+
+
 def submission_order(ready, cfg):
     """Quality first (fitness), lifted or lowered a little for what helps the Genius level (BRAIN docs, "Brain
     Genius"; user, 2026-10-29):
@@ -1258,7 +1319,16 @@ def submission_order(ready, cfg):
         nw = min(0.1, fresh * len({f for f in fields if (f, region) in field_ds} - used))
         return p + sh + nw
     supers = [r for r in ready if r.get("super")]
-    rest = sorted((r for r in ready if not r.get("super")), key=lambda r: -num(r["fitness"]) * (1 + lift(r)))
+    prod = load_prodcorr()
+    tier_rank = {"TOP": 0, "CLOSE": 1, "WEAK": 2}
+    theme = theme_region(cfg)
+
+    def in_theme(r):
+        s = r.get("settings") or {}
+        return (json.loads(s) if isinstance(s, str) else s).get("region", "USA") == theme
+    rest = sorted((r for r in ready if not r.get("super")),
+                  key=lambda r: (tier_rank[value_tier(r, cfg, prod)], not in_theme(r),
+                                 -num(r["fitness"]) * (1 + lift(r))))
     return supers + rest
 
 

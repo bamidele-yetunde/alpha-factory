@@ -105,9 +105,9 @@
   "crowded_prod_corr": 0.85,
   "max_template_share": 0.15,
   "region_share": {
-    "USA": 0.25,
+    "USA": 0.15,
     "EUR": 0.11,
-    "GLB": 0.11,
+    "GLB": 0.21,
     "ASI": 0.11,
     "CHN": 0.06,
     "KOR": 0.06,
@@ -493,5 +493,16 @@
       "daily": 3,
       "until": 20
     }
+  },
+  "value_rank": {
+    "enabled": true,
+    "top_margin_bps": 15,
+    "weak_margin_bps": 5,
+    "top_prod_corr": 0.7,
+    "close_after_hour_et": 16
+  },
+  "power_pool_theme": {
+    "region": "GLB",
+    "until": "2026-11-22"
   }
 }
