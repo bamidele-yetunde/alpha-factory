@@ -1493,9 +1493,18 @@ def settle_new_region(checks, alpha_id, cfg):
     (SELF_CORRELATION ERROR, PROD_CORRELATION then stays PENDING), so it never finishes. On submission BRAIN
     computes both: mLYox7b5 (IND, your first India alpha) was accepted as a Regular Alpha on 2026-10-23 with
     the preview stuck like that. With no submission in the region there is nothing to be self-correlated
-    with, and production correlation is measured directly; BRAIN still decides at submission."""
+    with, and production correlation is measured directly; BRAIN still decides at submission.
+
+    BRAIN can also finish that check with SELF_CORRELATION PASS and no value (GLB, 2026-11-04: P0MZL6wW, 58jEW536,
+    9qEVNePo, 78oLXJz2), which verify() took for unfinished, so GLB never verified. It counts as 0 there too."""
     from brain import BrainError
     by = {c["name"]: c for c in checks}
+    self_check = by.get("SELF_CORRELATION", {})
+    if self_check.get("result") == "PASS" and self_check.get("value") is None:
+        region = alpha_region(alpha_id)
+        if any((s.get("region") or "USA") == region and s.get("type") != "SUPER" for s in load_csv(SUBMITTED)):
+            return checks  # you have alphas there, so a value is due: wait for a proper check
+        return [{**c, "value": 0.0} if c["name"] == "SELF_CORRELATION" else c for c in checks]
     if by.get("SELF_CORRELATION", {}).get("result") != "ERROR" or             by.get("PROD_CORRELATION", {}).get("result") not in ("PENDING", "ERROR", None):
         return checks
     region = alpha_region(alpha_id)
