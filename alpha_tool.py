@@ -1749,7 +1749,13 @@ def verify_pending(cfg, sync_each=False):
     order = {a: i for i, a in enumerate(pending)}
     # Strongest first (then newest): the strongest are the likeliest regular alphas (user, 2026-10-22).
     sharpe = {r["alpha_id"]: abs(num(r["sharpe"])) for r in know.sims}
-    pending.sort(key=lambda a: (a not in passed_before, -round(sharpe.get(a, 0), 1), -order[a]))
+    # Until `power_pool_theme` ends, its region's alphas above the weak margin come next (user, 2026-11-05): by Sharpe
+    # they sat at places 84-424 of 430. Backed-off ones wait their turn, so an erroring check can't hold the front.
+    theme = theme_region(cfg)
+    weak_bps = (cfg.get("value_rank") or {}).get("weak_margin_bps", 5)
+    priority = {r["alpha_id"] for r in know.sims if theme and r["alpha_id"] in pending and r["alpha_id"] not in waiting
+                and json.loads(r["settings"] or "{}").get("region") == theme and num(r["margin"]) * 10000 >= weak_bps}
+    pending.sort(key=lambda a: (a not in passed_before, a not in priority, -round(sharpe.get(a, 0), 1), -order[a]))
     global _last_verify
     import time
     _last_verify = time.time()
@@ -1758,7 +1764,7 @@ def verify_pending(cfg, sync_each=False):
         # verify those now, and leave the still-computing ones for the next round with no back-off: they are
         # collected when ready instead of being waited on one by one.
         head = pending[:cfg.get("prestart_checks", 30)]  # asking costs nothing, so backed-off ones too
-        finished = brain().finished_checks(head)
+        finished = brain().finished_checks(head, prod_error_ok=priority)
         waiting = waiting - finished
         computing = [a for a in head if a not in finished]
         # Finished checks first, then a few others with a short wait (that starts their checks). Waiting

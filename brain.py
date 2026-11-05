@@ -467,10 +467,12 @@ class Brain:
             except requests.RequestException:
                 pass
 
-    def finished_checks(self, alpha_ids):
+    def finished_checks(self, alpha_ids, prod_error_ok=()):
         """Ask once (no waiting) which of these alphas' pre-submission checks BRAIN has finished: a check with
         a robust-universe test (IND, CHN) runs a second simulation and took far longer than the bot waited
-        (2026-10-22: the strongest IND alphas came back "unfinished" every time). Starts any not started yet."""
+        (2026-10-22: the strongest IND alphas came back "unfinished" every time). Starts any not started yet.
+        prod_error_ok: alphas that also count as finished when only PROD_CORRELATION errored (58jEW536, 2026-11-04);
+        verify() settles that error itself, and they would otherwise hold their place in the queue forever."""
         done = set()
         for alpha_id in alpha_ids:
             try:
@@ -487,7 +489,8 @@ class Brain:
             # In a region with none of your submissions, BRAIN's preview can't compute self-correlation
             # (ERROR) and then never starts production correlation (PENDING): that state is final.
             new_region = open_.get("SELF_CORRELATION") == "ERROR" and set(open_) <= {"SELF_CORRELATION", "PROD_CORRELATION"}
-            if checks and (not open_ or new_region):
+            prod_error = alpha_id in prod_error_ok and open_ == {"PROD_CORRELATION": "ERROR"}
+            if checks and (not open_ or new_region or prod_error):
                 done.add(alpha_id)
         return done
 
