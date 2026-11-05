@@ -757,6 +757,11 @@ def auto_submit(ready, cfg):
         if limit_hit:
             log(f"AUTO-SUBMIT {aid}: BRAIN's daily limit is reached ({', '.join(limit_hit)}); it waits for tomorrow")
             continue
+        amer = next((c for c in checks if c["name"] == "LOW_GLB_AMER_SHARPE"), None)
+        if kind == "POWER_POOL" and theme and amer and amer.get("result") != "PASS":
+            tried[aid] = today
+            log(f"AUTO-SUBMIT {aid}: {AMER_LOW} ({amer.get('value')}); it waits until the theme ends")
+            continue
         tried[aid] = today
         state["submit_attempts"] = tried
         save_notified(state)
@@ -1025,6 +1030,11 @@ def write_reports(cfg):
     weak = {r["alpha_id"] for r in ready if value_tier(r, cfg) == "WEAK"}
     ready = submission_order([r for r in ready if r["alpha_id"] not in weak], cfg)
     backups.update({a: (0.0, "margin too low to be worth a slot") for a in weak})
+    if theme_region(cfg):  # user, 2026-11-05: a theme alpha that can't count waits until the theme ends
+        low = {r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"
+               and AMER_LOW in (know.checks.get(r["alpha_id"]) or {}).get("detail", "")}
+        ready = [r for r in ready if r["alpha_id"] not in low]
+        backups.update({a: (0.0, AMER_LOW) for a in low})
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
     # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
@@ -1484,6 +1494,8 @@ POWER_POOL_TAG = "POWER_POOL"
 # BRAIN's daily submission limits show up as FAILing tests (REGULAR_SUBMISSION value=4 limit=4). They say
 # nothing about the alpha: on 2026-10-21 53 alphas (Sharpe up to 4.81) were wrongly recorded as failures.
 QUOTA_CHECKS = {"REGULAR_SUBMISSION", "SUPER_SUBMISSION"}
+# The GLB Power Pool theme counts only alphas with AMER Sharpe over 1; BRAIN's check calls lower ones WARNING.
+AMER_LOW = "AMER Sharpe under 1, not counted for the GLB theme"
 # Regular-alpha tests that only warn (not fail) for a Power Pool alpha with its description attached.
 REGULAR_BAR = {"LOW_SHARPE", "LOW_FITNESS", "PROD_CORRELATION", "LOW_2Y_SHARPE", "IS_LADDER_SHARPE"}
 
@@ -1639,6 +1651,12 @@ def verify(alpha_id, cfg, brain_allowed=True):
     if any(c.get("result") in ("PENDING", "ERROR") for c in checks):
         return None  # BRAIN hasn't finished, or its check errored: not verified, retry later
     self_check = next((c for c in checks if c["name"] == "SELF_CORRELATION"), None)
+    # BRAIN can pass it with no value (GLB after its first submission, 2026-11-05: RREeMKkj, VkxNV52w): the exact
+    # PnL check against all your submissions gives the number instead (user, 2026-11-05).
+    local_self = (self_check is not None and self_check.get("result") == "PASS" and self_check.get("value") is None
+                  and corr is not None)
+    if local_self:
+        self_check = {**self_check, "value": round(corr, 4)}
     if self_check is None or self_check.get("value") is None:
         return None  # no correlation value: not verified, retry later
     failed = [c["name"] for c in checks if c.get("result") == "FAIL" and c["name"] not in QUOTA_CHECKS]
@@ -1657,9 +1675,14 @@ def verify(alpha_id, cfg, brain_allowed=True):
         details.append(waived)
     if any(c.get("prod_unknown") for c in checks):
         details.append("PROD_CORRELATION errored on BRAIN's preview; BRAIN decides at submission")
+    if local_self:
+        details.append("SELF_CORRELATION passed by BRAIN with no value; exact PnL check used")
+    amer = next((c for c in checks if c["name"] == "LOW_GLB_AMER_SHARPE"), None)
+    if amer and amer.get("result") != "PASS":
+        details.append(f"{AMER_LOW} ({amer.get('value')})")
     return {"alpha_id": alpha_id, "checked_at": now,
             "verdict": "FAIL" if failed else "PASS", "failed": ";".join(failed),
-            "self_corr": self_corr, "corr_with": top.get("id", ""),
+            "self_corr": self_corr, "corr_with": top.get("id", "") or (closest if local_self else ""),
             "yearly_sharpe": json.dumps(sharpes), "detail": "; ".join(details)}
 
 
