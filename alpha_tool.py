@@ -761,6 +761,12 @@ def auto_submit(ready, cfg):
         if kind == "POWER_POOL" and theme and amer and amer.get("result") != "PASS":
             tried[aid] = today
             log(f"AUTO-SUBMIT {aid}: {AMER_LOW} ({amer.get('value')}); it waits until the theme ends")
+            # Record it so the ready list drops it: verified before the rule, npAdRP7M kept the only Power Pool
+            # place on the list and was re-checked 24 times on 2026-11-09, so no Power Pool alpha went in.
+            last = next((c for c in reversed(load_csv(CHECKS)) if c["alpha_id"] == aid and c["verdict"] == "PASS"), None)
+            if last and AMER_LOW not in last["detail"]:
+                append_csv(CHECKS, CHECK_COLUMNS, [{**last, "checked_at": datetime.now().isoformat(timespec="seconds"),
+                                                    "detail": f"{last['detail']}; {AMER_LOW} ({amer.get('value')})"}])
             continue
         tried[aid] = today
         state["submit_attempts"] = tried
@@ -1622,7 +1628,8 @@ def verify(alpha_id, cfg, brain_allowed=True):
         return {"alpha_id": alpha_id, "checked_at": now, "verdict": "PASS", "failed": "",
                 "self_corr": local, "corr_with": closest, "yearly_sharpe": json.dumps(sharpes),
                 "detail": "re-confirmed by exact PnL check against all submissions"
-                          + (f"; {POWER_POOL_TAG}" if POWER_POOL_TAG in earlier[-1]["detail"] else "")}
+                          + (f"; {POWER_POOL_TAG}" if POWER_POOL_TAG in earlier[-1]["detail"] else "")
+                          + (f"; {AMER_LOW}" if AMER_LOW in earlier[-1]["detail"] else "")}
 
     if not brain_allowed:
         return "WAIT"
