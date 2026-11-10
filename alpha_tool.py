@@ -705,9 +705,11 @@ def auto_submit(ready, cfg):
     def region_rank(aid):
         reg = region_of_alpha.get(aid)
         return 0 if not focus or reg == focus else 1 if build.get(reg, 0) > 0 else 2
+    low = amer_low_ids() if theme else set()  # can't count for the theme: they take the slot only in the evening
+
     def theme_rank(r):  # the Power Pool slot goes to the prize theme's region first
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
-        return 0 if kind == "POWER_POOL" and region_of_alpha.get(r["alpha_id"]) == theme else 1
+        return 0 if kind == "POWER_POOL" and region_of_alpha.get(r["alpha_id"]) == theme and r["alpha_id"] not in low else 1
     evening = et_hour() >= (cfg.get("value_rank") or {}).get("close_after_hour_et", 16)
     prod_now = load_prodcorr()
     tier_rank = {"TOP": 0, "CLOSE": 1, "WEAK": 2}
@@ -729,11 +731,11 @@ def auto_submit(ready, cfg):
         if kind == "POWER_POOL" and not power_pool_window(cfg):
             continue
         tier = value_tier(r, cfg, prod_now)
-        if tier == "WEAK":
+        if tier == "WEAK" and kind != "POWER_POOL":  # user, 2026-11-10: the Power Pool slot is used regardless
             continue
-        if tier == "CLOSE" and not evening:
+        if tier in ("CLOSE", "WEAK") and not evening:
             continue  # a TOP alpha may still turn up today; this one takes the slot in the evening if not
-        if kind == "POWER_POOL" and theme and region != theme and not evening:
+        if kind == "POWER_POOL" and theme and (region != theme or aid in low) and not evening:
             continue  # the prize theme's region gets the day first
         other_region = kind == "REGULAR" and focus and region != focus and not building
         if other_region and fallback <= 0:
@@ -758,15 +760,17 @@ def auto_submit(ready, cfg):
             log(f"AUTO-SUBMIT {aid}: BRAIN's daily limit is reached ({', '.join(limit_hit)}); it waits for tomorrow")
             continue
         amer = next((c for c in checks if c["name"] == "LOW_GLB_AMER_SHARPE"), None)
-        if kind == "POWER_POOL" and theme and amer and amer.get("result") != "PASS":
-            tried[aid] = today
-            log(f"AUTO-SUBMIT {aid}: {AMER_LOW} ({amer.get('value')}); it waits until the theme ends")
-            # Record it so the ready list drops it: verified before the rule, npAdRP7M kept the only Power Pool
-            # place on the list and was re-checked 24 times on 2026-11-09, so no Power Pool alpha went in.
+        if kind == "POWER_POOL" and theme and amer and amer.get("result") != "PASS" and aid not in low:
+            # Record it, so it sorts after the alphas that count (verified before the rule, npAdRP7M was refused
+            # 24 times on 2026-11-09 and no Power Pool alpha went in). In the evening it takes the slot anyway.
             last = next((c for c in reversed(load_csv(CHECKS)) if c["alpha_id"] == aid and c["verdict"] == "PASS"), None)
-            if last and AMER_LOW not in last["detail"]:
+            if last:
                 append_csv(CHECKS, CHECK_COLUMNS, [{**last, "checked_at": datetime.now().isoformat(timespec="seconds"),
                                                     "detail": f"{last['detail']}; {AMER_LOW} ({amer.get('value')})"}])
+            low.add(aid)
+            # Not this round: the ready list is rebuilt first, so an alpha that counts takes the slot if there is one.
+            log(f"AUTO-SUBMIT {aid}: {AMER_LOW} ({amer.get('value')}); alphas that count go first, then it may go in "
+                "the evening")
             continue
         tried[aid] = today
         state["submit_attempts"] = tried
@@ -1033,14 +1037,11 @@ def write_reports(cfg):
     before = {r["alpha_id"] for r in load_csv(READY)}
     supers = super_candidates()
     ready, backups, failing = build_basket(supers + know.shortlist(200, all_passes=True), cfg)
-    weak = {r["alpha_id"] for r in ready if value_tier(r, cfg) == "WEAK"}
+    # User, 2026-11-10: the Power Pool slot is used every day, so weak Power Pool alphas stay on the list; they sort
+    # last (submission_order: tier first, prize theme next), and AMER-low ones don't count as the theme's.
+    weak = {r["alpha_id"] for r in ready if value_tier(r, cfg) == "WEAK" and alpha_kind(r, know.checks) != "POWER_POOL"}
     ready = submission_order([r for r in ready if r["alpha_id"] not in weak], cfg)
     backups.update({a: (0.0, "margin too low to be worth a slot") for a in weak})
-    if theme_region(cfg):  # user, 2026-11-05: a theme alpha that can't count waits until the theme ends
-        low = {r["alpha_id"] for r in ready if alpha_kind(r, know.checks) == "POWER_POOL"
-               and AMER_LOW in (know.checks.get(r["alpha_id"]) or {}).get("detail", "")}
-        ready = [r for r in ready if r["alpha_id"] not in low]
-        backups.update({a: (0.0, AMER_LOW) for a in low})
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
     # Regular and Power Pool alphas share BRAIN's limit of 4 a day (REGULAR_SUBMISSION, 2026-10-21: 4 Power Pool
@@ -1300,6 +1301,14 @@ def value_tier(r, cfg, prod=None):
     return "CLOSE"
 
 
+def amer_low_ids():
+    """Alphas whose latest check says AMER Sharpe under 1: they can't count for the GLB Power Pool theme."""
+    last = {}
+    for c in load_csv(CHECKS):
+        last[c["alpha_id"]] = c["detail"]
+    return {a for a, d in last.items() if AMER_LOW in d}
+
+
 def theme_region(cfg):
     """Region of the Power Pool prize theme still running (`power_pool_theme`), else None."""
     theme = cfg.get("power_pool_theme") or {}
@@ -1339,9 +1348,11 @@ def submission_order(ready, cfg):
     tier_rank = {"TOP": 0, "CLOSE": 1, "WEAK": 2}
     theme = theme_region(cfg)
 
+    low = amer_low_ids() if theme else set()
+
     def in_theme(r):
         s = r.get("settings") or {}
-        return (json.loads(s) if isinstance(s, str) else s).get("region", "USA") == theme
+        return (json.loads(s) if isinstance(s, str) else s).get("region", "USA") == theme and r["alpha_id"] not in low
     rest = sorted((r for r in ready if not r.get("super")),
                   key=lambda r: (tier_rank[value_tier(r, cfg, prod)], not in_theme(r),
                                  -num(r["fitness"]) * (1 + lift(r))))
