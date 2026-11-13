@@ -2354,10 +2354,47 @@ def safe_heartbeat(cfg):
         log(f"Session renewal check failed: {str(e)[:120]}")
 
 
+def check_competitions(cfg):
+    """Telegram when BRAIN lists a new competition or one changes status (user, 2026-11-13). At most every
+    `competition_check_hours`; the first look only records what is there."""
+    hours = cfg.get("competition_check_hours", 6)
+    state = load_notified()
+    last = state.get("competitions_checked_at")
+    if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < hours * 3600:
+        return
+    from notify import esc, telegram
+    r = brain().request("GET", "/competitions?limit=50")
+    if r.status_code != 200:
+        log(f"COMPETITIONS: BRAIN answered {r.status_code}; trying again next time")
+        return
+    seen = state.get("competitions_seen")
+    now = {c["id"]: c for c in r.json().get("results", [])}
+    if seen is not None:
+        for cid, c in now.items():
+            if seen.get(cid) == c.get("status"):
+                continue
+            what = "NEW COMPETITION" if cid not in seen else f"COMPETITION STATUS {seen[cid]} -> {c.get('status')}"
+            dates = f"{(c.get('startDate') or '')[:10]} to {(c.get('endDate') or '')[:10]}"
+            signup = (c.get("signUpEndDate") or "")[:10]
+            log(f"{what}: {cid} {c.get('name')} ({c.get('status')}, {dates}, sign-up until {signup})")
+            telegram(f"\U0001F3C6 {esc(what)}: {esc(c.get('name') or cid)}\nStatus {esc(c.get('status'))} | {esc(dates)}"
+                     + (f" | sign-up until {esc(signup)}" if signup else ""))
+    state = load_notified()
+    state["competitions_seen"] = {cid: c.get("status") for cid, c in now.items()}
+    state["competitions_checked_at"] = datetime.now().isoformat(timespec="seconds")
+    save_notified(state)
+
+
 def watch_once(cfg):
     """Sync your submissions, re-check the ready list, then alphas waiting for a check."""
     from brain import BrainError, BrainLoginBlocked
     safe_heartbeat(cfg)
+    try:
+        check_competitions(cfg)
+    except BrainLoginBlocked:
+        raise
+    except Exception as e:
+        log(f"COMPETITIONS check failed, will try again: {str(e)[:120]}")
     try:
         sync_submitted()
         # Drop what you just submitted, and re-test every ready alpha against all your submissions
