@@ -472,7 +472,7 @@
   "focus_target": 10,
   "focus_regular_quota": 4,
   "focus_boost": 5,
-  "focus_fallback_after_hour_et": 14,
+  "focus_fallback_after_hour_et": 0,
   "focus_fallback_quota": 1,
   "pyramid_boost": 1.3,
   "pyramid_submit_bonus": 0.15,
@@ -499,7 +499,7 @@
     "top_margin_bps": 15,
     "weak_margin_bps": 5,
     "top_prod_corr": 0.7,
-    "close_after_hour_et": 16
+    "close_after_hour_et": 0
   },
   "power_pool_theme": {
     "region": "GLB",
