@@ -504,5 +504,9 @@
   "power_pool_theme": {
     "region": "GLB",
     "until": "2026-11-22"
+  },
+  "pyramid_push": {
+    "cells": ["GLB/D1/ANALYST"],
+    "until": "2026-12-31"
   }
 }

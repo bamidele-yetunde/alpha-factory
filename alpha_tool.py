@@ -707,8 +707,12 @@ def auto_submit(ready, cfg):
         return 0 if not focus or reg == focus else 1 if build.get(reg, 0) > 0 else 2
     low = amer_low_ids() if theme else set()  # can't count for the theme: they take the slot only in the evening
 
+    push = pyramid_push_ids(ready, cfg)  # user, 2026-11-13: the pyramid for Expert first
+
     def theme_rank(r):  # the Power Pool slot goes to the prize theme's region first
         kind = r.get("kind") or ("SUPER" if r.get("super") else "REGULAR")
+        if r["alpha_id"] in push:
+            return -1
         return 0 if kind == "POWER_POOL" and region_of_alpha.get(r["alpha_id"]) == theme and r["alpha_id"] not in low else 1
     evening = et_hour() >= (cfg.get("value_rank") or {}).get("close_after_hour_et", 16)
     prod_now = load_prodcorr()
@@ -1309,6 +1313,31 @@ def amer_low_ids():
     return {a for a, d in last.items() if AMER_LOW in d}
 
 
+def pyramid_push_ids(rows, cfg):
+    """Alphas that add to a pyramid named in `pyramid_push` while it has fewer than 3 alphas this quarter (user,
+    2026-11-13: the 10th pyramid for Expert; the GLB prize minimum of 5 is met). Their Power Pool slot comes
+    first, ahead of the prize theme; the push ends by itself once the pyramid is complete."""
+    from learner import fields_in
+    push = cfg.get("pyramid_push") or {}
+    if not push.get("cells") or push.get("until", "") < brain_today():
+        return set()
+    counts, cats = pyramid_counts(cfg)
+    open_cells = {c for c in push["cells"] if counts.get(c, 0) < 3}
+    if not open_cells:
+        return set()
+    delay = cfg["settings"]["delay"]
+    field_ds = {(f["id"], f.get("region") or "USA"): f["dataset"] for f in load_csv(FIELDS)}
+    out = set()
+    for r in rows:
+        s = r.get("settings") or {}
+        region = (json.loads(s) if isinstance(s, str) else s).get("region", "USA")
+        cells = {f"{region}/D{delay}/{dataset_category(field_ds[(f, region)], cats).upper()}"
+                 for f in fields_in(r.get("expression") or "") if (f, region) in field_ds}
+        if cells & open_cells:
+            out.add(r["alpha_id"])
+    return out
+
+
 def theme_region(cfg):
     """Region of the Power Pool prize theme still running (`power_pool_theme`), else None."""
     theme = cfg.get("power_pool_theme") or {}
@@ -1353,8 +1382,9 @@ def submission_order(ready, cfg):
     def in_theme(r):
         s = r.get("settings") or {}
         return (json.loads(s) if isinstance(s, str) else s).get("region", "USA") == theme and r["alpha_id"] not in low
+    push = pyramid_push_ids(ready, cfg)
     rest = sorted((r for r in ready if not r.get("super")),
-                  key=lambda r: (tier_rank[value_tier(r, cfg, prod)], not in_theme(r),
+                  key=lambda r: (r["alpha_id"] not in push, tier_rank[value_tier(r, cfg, prod)], not in_theme(r),
                                  -num(r["fitness"]) * (1 + lift(r))))
     return supers + rest
 
