@@ -75,6 +75,7 @@ jobs:
           alert() { python -c "import sys; from notify import telegram; telegram(sys.argv[1])" "$1" || true; }
           # At most one problem alert per hour: on 2026-10-15 a crash loop sent ~1,150 alerts in 3 hours.
           last_alert=-999999
+          last_wait_save=-999999
           alert_limited() {
             if [ $((SECONDS - last_alert)) -ge 3600 ]; then alert "$1"; last_alert=$SECONDS; fi
           }
@@ -89,10 +90,11 @@ jobs:
             if [ -f run_output.txt ]; then tail -c 200000 run_output.txt > run_output.tmp && mv run_output.tmp run_output.txt; fi
             timeout 70m python alpha_tool.py run-for --minutes 40 >> run_output.txt 2>&1 || rc=$?
             if [ $rc -eq 76 ]; then
-              # Still waiting for your face ID (the bot already looked every 3 min for 50 min): carry on looking.
-              save || true
+              # Still waiting for your face ID. With no live link the bot exits at once, so pause between looks
+              # (every 40 seconds until 2026-11-18) and save the state at most every 15 minutes.
+              if [ $((SECONDS - last_wait_save)) -ge 900 ]; then save || true; last_wait_save=$SECONDS; fi
               echo "waiting for face ID"
-              sleep 30
+              sleep 120
               continue
             elif [ $rc -eq 75 ]; then
               # BRAIN is blocking the login (captcha / identity check); the bot has told you on Telegram.

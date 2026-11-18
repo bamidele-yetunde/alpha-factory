@@ -788,6 +788,13 @@ def auto_submit(ready, cfg):
                     if srow["alpha_id"] == aid:
                         srow["verdict"], srow["verify_detail"] = "FAIL", f"BRAIN's check: {'; '.join(failed)}"
                         _update_super(srow)
+            else:  # 2026-11-18: a refused alpha stayed first in line and kept the day's only slot from the others
+                append_csv(CHECKS, CHECK_COLUMNS, [{
+                    "alpha_id": aid, "checked_at": datetime.now().isoformat(timespec="seconds"), "verdict": "FAIL",
+                    "failed": ";".join(c["name"] for c in checks if c.get("result") == "FAIL"),
+                    "self_corr": r.get("self_corr", ""), "corr_with": "", "yearly_sharpe": "",
+                    "detail": f"BRAIN's check at submission: {'; '.join(failed)}"}])
+                log(f"AUTO-SUBMIT {aid}: off the ready list; the next {kind} alpha takes its place")
             continue
         try:
             alpha = brain().submit(aid)
@@ -858,6 +865,10 @@ def requeue_once(cfg):
          lambda a, f: f <= QUOTA_CHECKS | {"NOT_ROBUST"} and f & QUOTA_CHECKS,
          "DAILY LIMIT: {n} alphas wrongly recorded as failures because BRAIN's daily limit was reached "
          "(Sharpe up to 4.81) queued for a fresh check"),
+        ("power_pool_quota_requeued", "re-check: it only hit BRAIN's daily Power Pool limit, which says nothing about the alpha",
+         lambda a, f: f <= QUOTA_CHECKS | {"NOT_ROBUST"} and "POWER_POOL_SUBMISSION" in f,
+         "DAILY LIMIT: {n} alphas wrongly recorded as failures because BRAIN's daily Power Pool limit was reached "
+         "queued for a fresh check"),
     ]
     now = datetime.now().isoformat(timespec="seconds")
     for flag, detail, wanted, message in rounds:
@@ -1079,8 +1090,11 @@ def write_reports(cfg):
         max(0, regular_quota(cfg) - (used["REGULAR"] - build_used)) + len(building))
     # Pool-building alphas first among regular ones, so the quota trim below keeps them.
     ready.sort(key=lambda r: alpha_kind(r, know.checks) == "REGULAR" and r["alpha_id"] not in building)
+    # An alpha already tried today gets no second attempt today, so it must not hold a slot another could use.
+    tried_today = {a for a, d in load_notified().get("submit_attempts", {}).items() if d == brain_today()}
     for kind, room, key in (("POWER_POOL", pool_room, "Power Pool"), ("REGULAR", regular_room, "alpha")):
-        same = [r for r in ready if alpha_kind(r, know.checks) == kind]
+        same = sorted((r for r in ready if alpha_kind(r, know.checks) == kind),
+                      key=lambda r: r["alpha_id"] in tried_today)
         if len(same) > room:
             held = {r["alpha_id"] for r in same[room:]}
             ready = [r for r in ready if r["alpha_id"] not in held]
@@ -1540,7 +1554,7 @@ def robustness(alpha_id, cfg):
 POWER_POOL_TAG = "POWER_POOL"
 # BRAIN's daily submission limits show up as FAILing tests (REGULAR_SUBMISSION value=4 limit=4). They say
 # nothing about the alpha: on 2026-10-21 53 alphas (Sharpe up to 4.81) were wrongly recorded as failures.
-QUOTA_CHECKS = {"REGULAR_SUBMISSION", "SUPER_SUBMISSION"}
+QUOTA_CHECKS = {"REGULAR_SUBMISSION", "SUPER_SUBMISSION", "POWER_POOL_SUBMISSION"}
 # The GLB Power Pool theme counts only alphas with AMER Sharpe over 1; BRAIN's check calls lower ones WARNING.
 AMER_LOW = "AMER Sharpe under 1, not counted for the GLB theme"
 # Regular-alpha tests that only warn (not fail) for a Power Pool alpha with its description attached.
@@ -2454,7 +2468,8 @@ def cmd_run_for(args):
 def login_blocked(error):
     """Log it, and tell you on Telegram at most every 6 hours: only a person can clear it."""
     from notify import esc, telegram
-    log(f"LOGIN BLOCKED by BRAIN: {str(error)[:150]} - waiting an hour before trying again")
+    wait = "looking again in 2 minutes" if "face ID" in str(error) else "waiting an hour before trying again"
+    log(f"LOGIN BLOCKED by BRAIN: {str(error)[:150]} - {wait}")
     if "face ID" in str(error):
         return  # the face ID link itself was already sent on Telegram; don't add a second message
     state = load_notified()
