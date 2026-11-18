@@ -1055,7 +1055,7 @@ def write_reports(cfg):
     # User, 2026-11-10: the Power Pool slot is used every day, so weak Power Pool alphas stay on the list; they sort
     # last (submission_order: tier first, prize theme next), and AMER-low ones don't count as the theme's.
     weak = {r["alpha_id"] for r in ready if value_tier(r, cfg) == "WEAK" and alpha_kind(r, know.checks) != "POWER_POOL"}
-    ready = submission_order([r for r in ready if r["alpha_id"] not in weak], cfg)
+    ready = submission_order([r for r in ready if r["alpha_id"] not in weak], cfg, know.checks)
     backups.update({a: (0.0, "margin too low to be worth a slot") for a in weak})
     # Consultant quota (BRAIN docs, "BRAIN Genius"): 4 Alphas and 1 SuperAlpha per day. Show only as many
     # regular alphas as can still be submitted today; the rest stay verified and appear tomorrow.
@@ -1358,7 +1358,7 @@ def theme_region(cfg):
     return theme.get("region") if theme.get("until", "") >= brain_today() else None
 
 
-def submission_order(ready, cfg):
+def submission_order(ready, cfg, checks=None):
     """Quality first (fitness), lifted or lowered a little for what helps the Genius level (BRAIN docs, "Brain
     Genius"; user, 2026-10-29):
     - pyramids: `pyramid_submit_bonus` (15%) for completing one (2 submissions this quarter), half for a second
@@ -1397,9 +1397,12 @@ def submission_order(ready, cfg):
         s = r.get("settings") or {}
         return (json.loads(s) if isinstance(s, str) else s).get("region", "USA") == theme and r["alpha_id"] not in low
     push = pyramid_push_ids(ready, cfg)
+
+    def counts_for_prize(r):  # user, 2026-11-18: until the theme ends, these go ahead of a better margin
+        return bool(theme and checks is not None and alpha_kind(r, checks) == "POWER_POOL" and in_theme(r))
     rest = sorted((r for r in ready if not r.get("super")),
-                  key=lambda r: (r["alpha_id"] not in push, tier_rank[value_tier(r, cfg, prod)], not in_theme(r),
-                                 -num(r["fitness"]) * (1 + lift(r))))
+                  key=lambda r: (r["alpha_id"] not in push, not counts_for_prize(r), tier_rank[value_tier(r, cfg, prod)],
+                                 not in_theme(r), -num(r["fitness"]) * (1 + lift(r))))
     return supers + rest
 
 
