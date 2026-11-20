@@ -30,7 +30,15 @@ SESSION = HERE / "brain_session.json"
 PERSONA = HERE / "brain_face_id.json"   # the face ID check waiting for you, if any
 PERSONA_GAP_HOURS = 6                     # a pending check is looked at for at most this long
 NIGHT_END_HOUR = 6                        # no new face ID checks opened by the bot itself 00:00-06:00
+BEDTIME = (20, 40, 21, 0)                 # user sleeps 21:00 (2026-11-20): offer a renewal 20:40-21:00 local
+BEDTIME_MIN_GAIN_HOURS = 1                # ... only when renewing then adds at least this much session time
+REMIND_MINUTES = 10                       # an unused renewal link is sent once more this close to the end
 LOG = print                               # alpha_tool sets its log() here, so login events reach activity_log.txt
+
+
+def wants_link(texts):
+    """/login or /renew sent to the Telegram bot: you want a face ID link now."""
+    return any(t.lower().lstrip("/").startswith(("login", "renew")) for t in texts)
 
 
 class BrainStuck(BrainError):
@@ -96,14 +104,43 @@ class Brain:
     def renew_if_needed(self, minutes_before=25):
         """Called between cycles. When the session ends within `minutes_before`, open ONE face ID check in
         a separate connection and send you the link, so you can renew before the bot stops. Also completes a
-        renewal you have just finished. Never blocks."""
+        renewal you have just finished. Never blocks.
+        2026-11-20 (user): also on /renew (or /login) sent to the Telegram bot, at bedtime (`BEDTIME`), and the
+        open link is sent once more `REMIND_MINUTES` before the end. Every link is still one you complete."""
+        from notify import commands, esc, telegram
+        left = getattr(self, "expires_at", 0) - time.time()
+        asked = wants_link(commands())
+        if not getattr(self, "_renewal", None):
+            # A renewal opened by an earlier 40-minute chunk: keep looking at it instead of forgetting it.
+            p = self._pending_face_id()
+            if p and p.get("renewal") and left > 0:
+                s = requests.Session()
+                s.cookies.update(p["cookies"])
+                s.auth = load_credentials()
+                self._renewal = (s, p["url"])
         if getattr(self, "_renewal", None):
+            url = self._renewal[1]
+            p = self._pending_face_id() or {}
+            if asked:
+                LOG("RENEW: /renew received; the open link is sent again")
+                telegram(f"\U0001F510 Here is the renewal link again (still valid):\n{esc(url)}")
+            elif left <= REMIND_MINUTES * 60 and p and not p.get("reminded"):
+                p["reminded"] = True
+                PERSONA.write_text(json.dumps(p), encoding="utf-8")
+                LOG(f"RENEW: reminder sent, session ends in {max(left, 0) / 60:.0f} min")
+                telegram(f"⏰ Reminder: the bot's BRAIN session ends in {max(left, 0) / 60:.0f} min. "
+                         f"Renew with your face ID so it doesn't stop:\n{esc(url)}")
             self._poll_renewal()
             return
-        left = getattr(self, "expires_at", 0) - time.time()
-        if left > minutes_before * 60 or self._pending_face_id():
+        bedtime = self._bedtime(left)
+        if asked:
+            reason = "you sent /renew"
+        elif bedtime:
+            reason = "bedtime"
+        elif left <= minutes_before * 60 and not self._pending_face_id():
+            reason = "session ending"
+        else:
             return
-        from notify import esc, telegram
         # Renew while the current, face-ID-verified session is still valid: the new request carries that
         # session's cookie. If BRAIN accepts it, sessions can be chained (4 h each, BRAIN's maximum) and face ID
         # is only needed when the chain breaks. A copy of the cookies is used, so a refusal can't touch the
@@ -116,7 +153,7 @@ class Brain:
         except requests.RequestException as e:
             LOG(f"RENEW: renewal request failed ({e}); trying again next round")
             return
-        LOG(f"RENEW: session ends in {left / 60:.0f} min; BRAIN answered the renewal with {r.status_code} "
+        LOG(f"RENEW ({reason}): session ends in {left / 60:.0f} min; BRAIN answered the renewal with {r.status_code} "
             f"{r.headers.get('WWW-Authenticate', '')}".rstrip())
         if r.status_code in (200, 201):  # BRAIN didn't ask for face ID this time
             self.s.cookies.update(s.cookies)
@@ -125,11 +162,28 @@ class Brain:
             return
         if r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona":
             url = urljoin(r.url, r.headers["Location"])
-            self._remember_face_id(url, s)
+            self._remember_face_id(url, s, renewal=True)
             self._renewal = (s, url)
             ends = time.strftime("%H:%M", time.localtime(getattr(self, "expires_at", time.time())))
-            telegram(f"\U0001F510 The bot's BRAIN session ends at {ends}. Renew it now with your face ID so the "
-                     f"bot keeps working without a gap:\n{esc(url)}")
+            if reason == "bedtime":
+                until = time.strftime("%H:%M", time.localtime(time.time() + 4 * 3600))
+                telegram(f"\U0001F319 Going to bed soon? The bot's BRAIN session ends at {ends}. Renew it now with "
+                         f"your face ID and the bot keeps working until about {until}:\n{esc(url)}")
+            else:
+                telegram(f"\U0001F510 The bot's BRAIN session ends at {ends}. Renew it now with your face ID so the "
+                         f"bot keeps working without a gap (a fresh 4 hours from when you finish):\n{esc(url)}")
+        elif asked:
+            telegram(f"⚠️ /renew: BRAIN did not give a face ID link this time ({r.status_code}). "
+                     "The bot asks again before the session ends.")
+
+    def _bedtime(self, left):
+        """20:40-21:00 local, once: renewing now must add at least `BEDTIME_MIN_GAIN_HOURS`, no link may be
+        open, and the 30-minute spacing between new checks applies (so an ignored link isn't repeated)."""
+        now = time.localtime()
+        h1, m1, h2, m2 = BEDTIME
+        minute = now.tm_hour * 60 + now.tm_min
+        return (h1 * 60 + m1 <= minute < h2 * 60 + m2 and 0 < left < (4 - BEDTIME_MIN_GAIN_HOURS) * 3600
+                and not self._pending_face_id() and self._may_open_face_id())
 
     def _poll_renewal(self):
         s, url = self._renewal
@@ -162,7 +216,7 @@ class Brain:
                     return "EXPIRED"
             except requests.RequestException:
                 pass
-            if any(c.lower().lstrip("/").startswith("login") for c in commands()):
+            if wants_link(commands()):
                 return "REQUESTED"
             if time.time() + 60 > deadline:
                 return False
@@ -196,9 +250,9 @@ class Brain:
         except (OSError, ValueError):
             pass
 
-    def _remember_face_id(self, url, session):
+    def _remember_face_id(self, url, session, renewal=False):
         tmp = PERSONA.with_name(PERSONA.name + ".tmp")
-        tmp.write_text(json.dumps({"url": url, "opened_at": time.time(),
+        tmp.write_text(json.dumps({"url": url, "opened_at": time.time(), "renewal": renewal,
                                    "cookies": requests.utils.dict_from_cookiejar(session.cookies)}),
                        encoding="utf-8")
         os.replace(tmp, PERSONA)
@@ -268,7 +322,7 @@ class Brain:
             elif PERSONA.exists() and not self._may_open_face_id():
                 # Last link expired at night: wait for 06:00 or for /login.
                 from notify import commands
-                if any(c.lower().lstrip("/").startswith("login") for c in commands()):
+                if wants_link(commands()):
                     requested = True
                 else:
                     raise BrainLoginBlocked(self._expired_message())
