@@ -1236,7 +1236,10 @@ def record_pyramids(alphas):
     state["pyramids"] = {"quarter": start, "counts": dict(counts)}
     state["os_alphas"] = [{"id": a["id"], "region": (a.get("settings") or {}).get("region", "USA"),
                            "delay": (a.get("settings") or {}).get("delay", 1), "type": a.get("type"),
-                           "sharpe": (a.get("is") or {}).get("sharpe") or 0, "points": a.get("osmosisPoints")}
+                           "sharpe": (a.get("is") or {}).get("sharpe") or 0, "points": a.get("osmosisPoints"),
+                           # 2026-11-20: alphas from before the consultant start sit in the "challenge" competition;
+                           # BRAIN refuses Osmosis points for them ("non-compensated alpha")
+                           "paid": not any(c.get("id") == "challenge" for c in a.get("competitions") or [])}
                           for a in alphas]
     summary = (f"{sum(n >= 3 for n in counts.values())} formulated (3+ this quarter); one or two short: "
                f"{', '.join(f'{p} {n}' for p, n in sorted(counts.items()) if n < 3) or 'none'}")
@@ -1419,7 +1422,8 @@ def update_osmosis(cfg):
     alphas = state.get("os_alphas") or []
     scopes = {}
     for a in alphas:
-        scopes.setdefault((a["region"], a["delay"]), []).append(a)
+        if a.get("paid", True):  # 2026-11-20: Challenge-era alphas can't take points, so USA had only 10,000 of 100,000
+            scopes.setdefault((a["region"], a["delay"]), []).append(a)
     need = oc.get("min_alphas", 10)
     ok = {k: v for k, v in scopes.items() if len(v) >= need}
     key = sorted(f"{r}/D{d}" for r, d in ok)
